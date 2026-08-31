@@ -245,6 +245,18 @@ hermes profile export coder   # pack into coder.tar.gz (shareable; keys stripped
 hermes profile import coder.tar.gz   # install an archive as a new profile
 ```
 
+For scripts and local integrations, use the stable path-free JSON inventory:
+
+```bash
+hermes profile list --json
+```
+
+The output carries schema `hermes-profile-list/v1` plus canonical profile IDs,
+display names/descriptions, model/provider labels, gateway-running state, alias,
+distribution metadata, and the active-profile marker. It deliberately omits
+profile filesystem paths, `.env` presence, skill counts, and credentials. Treat
+`name` as the launch selector; `display_name` is presentation only.
+
 In chat, the same two live as `/export` and `/import` — and in the desktop app as **⌘K → Export/Import profile…**. See [Sharing a profile](#sharing-a-profile).
 
 ### Naming the default profile

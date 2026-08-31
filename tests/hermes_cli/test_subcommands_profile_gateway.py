@@ -47,6 +47,16 @@ def _gateway_parser():
     return p
 
 
+def test_profile_list_accepts_machine_json_flag():
+    parser = _profile_parser()
+    args = parser.parse_args(["profile", "list", "--json"])
+
+    assert args.command == "profile"
+    assert args.profile_action == "list"
+    assert args.json is True
+    assert args.func is _h_profile
+
+
 
 
 

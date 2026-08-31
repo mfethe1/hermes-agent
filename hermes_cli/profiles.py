@@ -725,6 +725,47 @@ class ProfileInfo:
     display_name: str = ""
 
 
+def profile_info_to_public_json(
+    profile: ProfileInfo,
+    *,
+    active_profile: str,
+) -> Dict[str, object]:
+    """Project one profile into the stable public CLI inventory shape.
+
+    The machine inventory is intentionally smaller than ``ProfileInfo``. Local
+    filesystem paths, ``.env`` presence, and skill counts are desktop/operator
+    implementation details and must not become a cross-product discovery API.
+    """
+
+    distribution = None
+    if (
+        profile.distribution_name
+        or profile.distribution_version
+        or profile.distribution_source
+    ):
+        distribution = {
+            "name": profile.distribution_name,
+            "version": profile.distribution_version,
+            "source": profile.distribution_source,
+        }
+
+    alias = None if profile.is_default else profile.alias_name
+    return {
+        "name": profile.name,
+        "display_name": profile.display_name,
+        "description": profile.description,
+        "description_auto": profile.description_auto,
+        "is_default": profile.is_default,
+        "active": profile.name == active_profile
+        or (active_profile == "default" and profile.is_default),
+        "model": profile.model,
+        "provider": profile.provider,
+        "gateway_running": profile.gateway_running,
+        "alias": alias,
+        "distribution": distribution,
+    }
+
+
 def _read_distribution_meta(profile_dir: Path) -> tuple:
     """Return ``(name, version, source)`` from the profile's ``distribution.yaml``
     if present; ``(None, None, None)`` otherwise.

@@ -11033,6 +11033,21 @@ def cmd_profile(args):
         profiles = list_profiles()
         active = get_active_profile_name()
 
+        if getattr(args, "json", False):
+            import json as _json
+            from hermes_cli.profiles import profile_info_to_public_json
+
+            payload = {
+                "schema": "hermes-profile-list/v1",
+                "active_profile": active,
+                "profiles": [
+                    profile_info_to_public_json(p, active_profile=active)
+                    for p in profiles
+                ],
+            }
+            print(_json.dumps(payload, sort_keys=True))
+            return
+
         if not profiles:
             print("No profiles found.")
             return
