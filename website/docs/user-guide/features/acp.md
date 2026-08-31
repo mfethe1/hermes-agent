@@ -81,6 +81,12 @@ released automatically by the OS if the process crashes. A local
 `acp.runtime.lock` sidecar is diagnostics only; never infer liveness from that
 file without probing the OS lock.
 
+The ACP `initialize` response attests the selected profile at
+`agentInfo._meta.hermes.profile`. Hosts that bind a managed runtime to a named
+profile should compare that value with the requested profile and terminate the
+process on a mismatch. The value is the canonical profile ID (`jake`), never a
+filesystem path or credential.
+
 ```bash
 python -m acp_adapter
 ```

@@ -227,6 +227,19 @@ try:
 except Exception:
     HERMES_VERSION = "0.0.0"
 
+
+def _selected_profile_name() -> str:
+    """Return the canonical profile behind this ACP process's HERMES_HOME."""
+
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name()
+    except Exception:
+        logger.debug("Could not resolve selected Hermes profile", exc_info=True)
+        return "default"
+
+
 # Thread pool for running AIAgent (synchronous) in parallel.
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
 
@@ -1313,7 +1326,15 @@ class HermesACPAgent(acp.Agent):
 
         return InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
-            agent_info=Implementation(name="hermes-agent", version=HERMES_VERSION),
+            agent_info=Implementation(
+                name="hermes-agent",
+                version=HERMES_VERSION,
+                field_meta={
+                    "hermes": {
+                        "profile": _selected_profile_name(),
+                    }
+                },
+            ),
             agent_capabilities=AgentCapabilities(
                 load_session=True,
                 prompt_capabilities=PromptCapabilities(image=True),
