@@ -256,6 +256,16 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(rc)
         return
 
+    profile_lease = None
+    if args.profile:
+        from .profile_lock import ProfileRuntimeBusy, acquire_profile_runtime_lease
+
+        try:
+            profile_lease = acquire_profile_runtime_lease(args.profile)
+        except ProfileRuntimeBusy as exc:
+            print(f"Hermes ACP profile busy: {exc}", file=sys.stderr)
+            sys.exit(3)
+
     _setup_logging()
     _load_env()
 
@@ -297,6 +307,9 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.exception("ACP agent crashed")
         sys.exit(1)
+    finally:
+        if profile_lease is not None:
+            profile_lease.release()
 
 
 if __name__ == "__main__":

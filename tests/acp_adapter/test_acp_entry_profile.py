@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from acp_adapter import entry
 
 
@@ -44,3 +46,26 @@ def test_acp_check_applies_profile_before_import_check(monkeypatch):
     entry.main(["--profile", "jake", "--check"])
 
     assert observed == {"profile": "jake", "checked_after": "jake"}
+
+
+def test_profile_busy_fails_before_acp_runtime_boot(monkeypatch):
+    from acp_adapter import profile_lock
+
+    monkeypatch.setattr(entry, "_apply_profile", lambda _name: None)
+    monkeypatch.setattr(
+        profile_lock,
+        "acquire_profile_runtime_lease",
+        lambda _name: (_ for _ in ()).throw(
+            profile_lock.ProfileRuntimeBusy("profile already active")
+        ),
+    )
+    monkeypatch.setattr(
+        entry,
+        "_setup_logging",
+        lambda: pytest.fail("runtime boot must not start while profile is busy"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        entry.main(["--profile", "jake"])
+
+    assert exc.value.code == 3
