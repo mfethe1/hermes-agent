@@ -61,6 +61,19 @@ hermes acp
 hermes-acp
 ```
 
+Select a named profile directly when the ACP host needs a specific isolated
+agent identity:
+
+```bash
+hermes-acp --profile jake
+hermes-acp --profile jake --check
+```
+
+`--profile` is applied before Hermes loads config, `.env`, memory, sessions,
+skills, or MCP state, so the ACP process is fully scoped to that profile. It is
+the direct-launch equivalent of `hermes -p jake acp` and is intended for local
+ACP hosts that bind one managed runtime to one Hermes profile.
+
 ```bash
 python -m acp_adapter
 ```

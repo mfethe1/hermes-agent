@@ -121,6 +121,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="hermes-acp",
         description="Run Hermes Agent as an ACP stdio server.",
     )
+    parser.add_argument(
+        "--profile",
+        "-p",
+        help="Run ACP with the named Hermes profile (same profile boundary as `hermes -p`)",
+    )
     parser.add_argument("--version", action="store_true", help="Print Hermes version and exit")
     parser.add_argument(
         "--check",
@@ -147,6 +152,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "~400 MB Chromium download confirmation).",
     )
     return parser.parse_args(argv)
+
+
+def _apply_profile(profile_name: str) -> None:
+    """Select a profile before any config, env, logging, or ACP state loads."""
+
+    from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+    normalized = normalize_profile_name(profile_name)
+    os.environ["HERMES_HOME"] = resolve_profile_env(normalized)
+    os.environ["HERMES_PROFILE_NAME"] = normalized
 
 
 def _print_version() -> None:
@@ -220,6 +235,12 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
 def main(argv: list[str] | None = None) -> None:
     """Entry point: load env, configure logging, run the ACP agent."""
     args = _parse_args(argv)
+    if args.profile:
+        try:
+            _apply_profile(args.profile)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"Hermes ACP profile error: {exc}", file=sys.stderr)
+            sys.exit(2)
     if args.version:
         _print_version()
         return
