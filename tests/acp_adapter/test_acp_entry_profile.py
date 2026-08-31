@@ -69,3 +69,31 @@ def test_profile_busy_fails_before_acp_runtime_boot(monkeypatch):
         entry.main(["--profile", "jake"])
 
     assert exc.value.code == 3
+
+
+def test_profile_lease_releases_when_runtime_setup_raises(monkeypatch):
+    from acp_adapter import profile_lock
+
+    class Lease:
+        released = False
+
+        def release(self):
+            self.released = True
+
+    lease = Lease()
+    monkeypatch.setattr(entry, "_apply_profile", lambda _name: None)
+    monkeypatch.setattr(
+        profile_lock,
+        "acquire_profile_runtime_lease",
+        lambda _name: lease,
+    )
+    monkeypatch.setattr(
+        entry,
+        "_run_server",
+        lambda: (_ for _ in ()).throw(RuntimeError("setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        entry.main(["--profile", "jake"])
+
+    assert lease.released is True

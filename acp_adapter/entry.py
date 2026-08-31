@@ -232,8 +232,49 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
         return 1
 
 
+def _run_server() -> None:
+    """Boot and run the ACP server after profile selection/lease acquisition."""
+
+    _setup_logging()
+    _load_env()
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting hermes-agent ACP adapter")
+
+    # Ensure the project root is on sys.path so ``from run_agent import AIAgent`` works
+    project_root = str(Path(__file__).resolve().parent.parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    import acp
+    from .server import HermesACPAgent
+
+    # MCP tool discovery from config.yaml — fire-and-forget in a
+    # background daemon thread so the ACP server becomes responsive
+    # immediately while MCP servers connect.
+    if os.environ.get("HERMES_ACP_SKIP_CONFIGURED_MCP", "").strip() != "1":
+        try:
+            from hermes_cli.mcp_startup import start_background_mcp_discovery
+
+            start_background_mcp_discovery(
+                logger=logger,
+                thread_name="acp-mcp-discovery",
+            )
+        except Exception:
+            logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
+
+    agent = HermesACPAgent()
+    try:
+        asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
+    except KeyboardInterrupt:
+        logger.info("Shutting down (KeyboardInterrupt)")
+    except Exception:
+        logger.exception("ACP agent crashed")
+        sys.exit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
-    """Entry point: load env, configure logging, run the ACP agent."""
+    """Entry point: select profile, acquire its lease, then run ACP."""
     args = _parse_args(argv)
     if args.profile:
         try:
@@ -266,47 +307,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Hermes ACP profile busy: {exc}", file=sys.stderr)
             sys.exit(3)
 
-    _setup_logging()
-    _load_env()
-
-    logger = logging.getLogger(__name__)
-    logger.info("Starting hermes-agent ACP adapter")
-
-    # Ensure the project root is on sys.path so ``from run_agent import AIAgent`` works
-    project_root = str(Path(__file__).resolve().parent.parent)
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-
-    import acp
-    from .server import HermesACPAgent
-
-    # MCP tool discovery from config.yaml — fire-and-forget in a
-    # background daemon thread so the ACP server becomes responsive
-    # immediately while MCP servers connect.  Previously this blocked
-    # asyncio.run() for 2-5 s.  (ACP also registers per-session MCP
-    # servers dynamically via asyncio.to_thread inside the event loop;
-    # that path is unaffected.)  Moved from model_tools.py module scope
-    # to avoid freezing the gateway's loop on lazy import (#16856).
-    # Metadata-only hosts can opt out of unrelated global MCP startup.
-    if os.environ.get("HERMES_ACP_SKIP_CONFIGURED_MCP", "").strip() != "1":
-        try:
-            from hermes_cli.mcp_startup import start_background_mcp_discovery
-
-            start_background_mcp_discovery(
-                logger=logger,
-                thread_name="acp-mcp-discovery",
-            )
-        except Exception:
-            logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
-
-    agent = HermesACPAgent()
     try:
-        asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
-    except KeyboardInterrupt:
-        logger.info("Shutting down (KeyboardInterrupt)")
-    except Exception:
-        logger.exception("ACP agent crashed")
-        sys.exit(1)
+        _run_server()
     finally:
         if profile_lease is not None:
             profile_lease.release()
