@@ -77,9 +77,8 @@ ACP hosts that bind one managed runtime to one Hermes profile.
 A named-profile ACP server shares Hermes's OS-backed profile runtime lock with
 the profile gateway. Starting a second ACP process, or starting ACP while that
 profile's gateway is running, fails closed before runtime boot. The lock is
-released automatically by the OS if the process crashes. A local
-`acp.runtime.lock` sidecar is diagnostics only; never infer liveness from that
-file without probing the OS lock.
+released automatically by the OS if the process crashes; Hermes writes no
+second liveness file that could become stale.
 
 The ACP `initialize` response attests the selected profile at
 `agentInfo._meta.hermes.profile`. Hosts that bind a managed runtime to a named
