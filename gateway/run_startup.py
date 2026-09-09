@@ -510,7 +510,7 @@ class GatewayStartupMixin:
         ``resume_pending`` for the reconnect watcher, which re-calls this scoped to that ``platform``;
         sessions with a running agent are skipped so none is resumed twice."""
         # Leave durable resume markers untouched until admission reopens.
-        if self._external_drain_active or self._draining:
+        if self._external_drain_active or self._startup_should_abort():
             return 0
         from gateway.run import _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window
         window = _auto_continue_freshness_window()
@@ -1315,7 +1315,13 @@ class GatewayStartupMixin:
         # Read before the first await: adapters may admit work as soon as they
         # connect, well before the background drain watcher gets its first tick.
         from gateway.drain_control import drain_requested
-        if drain_requested():
+        try:
+            external_drain = drain_requested()
+        except UnicodeDecodeError:
+            # An unreadable marker cannot establish permission to admit work.
+            logger.warning("Invalid UTF-8 drain marker at startup; keeping admission closed")
+            external_drain = True
+        if external_drain:
             self._enter_external_drain()
         logger.info("Starting Hermes Gateway...")
         self._start_install_faulthandler()

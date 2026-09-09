@@ -627,7 +627,7 @@ class GatewayShutdownMixin:
         if not self._external_drain_active:
             return
         self._external_drain_active = False
-        if self._draining or not self._running:
+        if self._startup_should_abort() or not self._running:
             logger.info(
                 "External drain marker cleared during shutdown — not reverting "
                 "to running (shutdown takes precedence)."
@@ -638,6 +638,9 @@ class GatewayShutdownMixin:
             "re-accepting new turns; gateway_state -> running."
         )
         self._update_runtime_status("running")
+        # Connected adapters will not trigger reconnect recovery. Reuse the
+        # scheduler's freshness, authorization and synchronous duplicate claim.
+        self._schedule_resume_pending_sessions()
 
     async def _drain_control_watcher(self, interval: float = 1.0) -> None:
         """Poll ``.drain_request.json`` at 1s: present -> enter drain, absent -> exit; a stale epoch = absent."""
