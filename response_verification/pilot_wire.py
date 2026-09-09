@@ -36,8 +36,28 @@ def strict_json(raw):
             result[key] = value
         return result
 
+    # Reject invalid UTF-8 and excessive nesting before allocating parsed containers.
+    text = raw.decode("utf-8")
+    depth = 0
+    quoted = escaped = False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > 7:
+                raise ValueError("depth")
+        elif char in "]}":
+            depth -= 1
     value = json.loads(
-        raw,
+        text,
         object_pairs_hook=pairs,
         parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")),
     )

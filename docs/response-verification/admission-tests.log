@@ -1,0 +1,102 @@
+▶ skipping venv without pytest: /Users/mfethe/.hermes/hermes-agent/venv
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /opt/homebrew/bin/python3
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 4 test files (~44 tests) under ['tests/response_verification', 'tests/gateway/test_stream_final_contract.py']; running with -j 20
+[ 20.5% |     9/~44 | ✓57 | ✗ 0] ✓ tests/response_verification/test_core.py (57✓, 1.0s)
+[ 38.6% |    17/~44 | ✓65 | ✗ 0] ✓ tests/gateway/test_stream_final_contract.py (8✓, 1.7s)
+[ 54.5% |    24/~44 | ✓98 | ✗ 0] ✓ tests/response_verification/test_admission.py (33✓, 5.0s)
+[100.0% |    44/~44 | ✓164 | ✗  2] ✗ tests/response_verification/test_pilot.py (66✓ 2✗, 7.7s)
+
+  ╔╍ Failed: tests/response_verification/test_pilot.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ plugins: anyio-4.12.1, asyncio-1.3.0
+  ║ asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+  ║ collected 68 items
+  ║
+  ║ tests/response_verification/test_pilot.py .............................F [ 44%]
+  ║ ..F...................................                                   [100%]
+  ║
+  ║ =================================== FAILURES ===================================
+  ║ _______________ test_real_verifier_failures[print("x" * 20000)] ________________
+  ║ tests/response_verification/test_pilot.py:193: in test_real_verifier_failures
+  ║     await deliver(adapter, event, wire)
+  ║ tests/response_verification/test_pilot.py:82: in deliver
+  ║     await adapter.deliver(event, raw, SENTINEL)
+  ║ gateway/response_verification_pilot.py:69: in deliver
+  ║     await self.attempt.prepare(raw)
+  ║ response_verification/pilot.py:178: in prepare
+  ║     raise result
+  ║ response_verification/pilot.py:169: in reap
+  ║     os.killpg(proc.pid, signal.SIGKILL)
+  ║ E   PermissionError: [Errno 1] Operation not permitted
+  ║ _____________ test_real_collected_receipt_negatives_at_sink[stale] _____________
+  ║ tests/response_verification/test_pilot.py:271: in test_real_collected_receipt_negatives_at_sink
+  ║     assert adapter.attempt.process_returncode == 0
+  ║ E   assert None == 0
+  ║ E    +  where None = <response_verification.pilot.PilotAttempt object at 0x109eb9a70>.process_returncode
+  ║ E    +    where <response_verification.pilot.PilotAttempt object at 0x109eb9a70> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x109ebc410>.attempt
+  ║ =========================== short test summary info ============================
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("x" * 20000)]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_collected_receipt_negatives_at_sink[stale]
+  ║ ========================= 2 failed, 66 passed in 7.10s =========================
+  ║
+  ║  Repro: python -m pytest tests/response_verification/test_pilot.py --tb=short
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 4 files, 164 tests passed, 2 failed (100% complete) in 7.7s (20 workers) ===
+  Durations cached to test_durations.json (4 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   4
+  Total subprocess CPU-wall: 15.4s  (runner wall: 7.7s, parallelism: 20x)
+  P50: 5.01s  P90: 7.73s  P95: 7.73s  P99: 7.73s  Max: 7.73s
+  <1s: 1 files (25%)  <2s: 2 files (50%)
+  Top 10 slowest:
+      7.73s  tests/response_verification/test_pilot.py
+      5.01s  tests/response_verification/test_admission.py
+      1.69s  tests/gateway/test_stream_final_contract.py
+      0.98s  tests/response_verification/test_core.py
+
+=== Failure output ===
+
+--- tests/response_verification/test_pilot.py ---
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/mfethe/.hermes/worktrees/response-verification-001
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 68 items
+
+tests/response_verification/test_pilot.py .............................F [ 44%]
+..F...................................                                   [100%]
+
+=================================== FAILURES ===================================
+_______________ test_real_verifier_failures[print("x" * 20000)] ________________
+tests/response_verification/test_pilot.py:193: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:82: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:69: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:178: in prepare
+    raise result
+response_verification/pilot.py:169: in reap
+    os.killpg(proc.pid, signal.SIGKILL)
+E   PermissionError: [Errno 1] Operation not permitted
+_____________ test_real_collected_receipt_negatives_at_sink[stale] _____________
+tests/response_verification/test_pilot.py:271: in test_real_collected_receipt_negatives_at_sink
+    assert adapter.attempt.process_returncode == 0
+E   assert None == 0
+E    +  where None = <response_verification.pilot.PilotAttempt object at 0x109eb9a70>.process_returncode
+E    +    where <response_verification.pilot.PilotAttempt object at 0x109eb9a70> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x109ebc410>.attempt
+=========================== short test summary info ============================
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("x" * 20000)]
+FAILED tests/response_verification/test_pilot.py::test_real_collected_receipt_negatives_at_sink[stale]
+========================= 2 failed, 66 passed in 7.10s =========================
+
+=== 1 file with test failures (2 tests failed) ===
+  tests/response_verification/test_pilot.py  (2 tests failed)

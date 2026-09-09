@@ -1,7 +1,7 @@
 """Single attempt, process-local pilot boundary; no production registration."""
 
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -10,10 +10,11 @@ import signal
 import sys
 
 from response_verification.core import evaluate_completion
+from response_verification.admission import SnapshotAdmission, context_wire
 from response_verification.pilot_wire import LIMIT, decode_envelope, decode_receipt
 
-COMPLETE = "COMPLETE: Verified isolated artifact state."
-DENIED = "INCOMPLETE: Isolated artifact state could not be verified."
+COMPLETE = "COMPLETE: Verified admitted snapshot bytes only."
+DENIED = "INCOMPLETE: Admitted snapshot could not be verified."
 
 
 async def settle_owned(task):
@@ -28,9 +29,12 @@ async def settle_owned(task):
 
 
 class PilotAttempt:
-    def __init__(self, context, artifact_path, *, timeout=2.0, command=None):
-        self.context = context
-        self.artifact_path = str(artifact_path)
+    def __init__(self, context, admission, *, timeout=2.0, command=None):
+        if type(admission) is not SnapshotAdmission:
+            raise ValueError("explicit snapshot admission required")
+        admission.validate(context)
+        self._admission = admission
+        self._context = admission.context
         self.timeout = timeout
         self.command = command or [
             sys.executable,
@@ -45,6 +49,20 @@ class PilotAttempt:
         self.process_returncode = None
         self.terminal = False
         self._active_task = None
+
+    @property
+    def context(self):
+        return self._context
+
+    @context.setter
+    def context(self, value):
+        # Any context replacement invalidates this attempt permanently, even on revert.
+        self.failed = True
+        self._context = value
+
+    @property
+    def admission(self):
+        return self._admission
 
     def buffer(self, draft):
         if self.terminal:
@@ -90,14 +108,11 @@ class PilotAttempt:
         launch = exchange_task = None
         try:
             self.envelope = decode_envelope(raw)
-            context = asdict(self.context)
-            context["evaluated_at"] = None
-            context["receipt_max_age"] = self.context.receipt_max_age.total_seconds()
-            context["trusted_issuers"] = sorted(self.context.trusted_issuers)
+            self._admission.validate(self.context)
             job = json.dumps({
-                "context": context,
-                "artifact_path": self.artifact_path,
-                "envelope": raw.decode(),
+                "context": context_wire(self.context),
+                "admission": self._admission.wire(),
+                "envelope": raw.decode("utf-8"),
             }).encode()
             if len(job) > LIMIT:
                 raise ValueError("job size")
@@ -177,6 +192,7 @@ class PilotAttempt:
         ):
             return DENIED
         try:
+            self._admission.validate(self.context)
             current = replace(self.context, evaluated_at=datetime.now(timezone.utc))
             if evaluate_completion(current, self.envelope, (self.receipt,)).eligible:
                 return COMPLETE

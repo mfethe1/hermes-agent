@@ -21,6 +21,7 @@ from response_verification.core import (
     criterion_digest,
 )
 from response_verification.pilot import COMPLETE, DENIED, PilotAttempt
+from response_verification.admission import admit_snapshot, SNAPSHOT_CLAIM
 
 # Real process-group signals are required; all targets are newly spawned pilot children.
 pytestmark = pytest.mark.live_system_guard_bypass
@@ -28,7 +29,9 @@ pytestmark = pytest.mark.live_system_guard_bypass
 SENTINEL = "DRAFT_SENTINEL_899cab_DO_NOT_SEND"
 
 
-def fixture(tmp_path, attempt_id="attempt-1", **kwargs):
+def fixture(
+    tmp_path, attempt_id="attempt-1", *, receipt_max_age=timedelta(seconds=30), **kwargs
+):
     path = tmp_path / attempt_id
     path.write_bytes(b"actual isolated artifact bytes\x00\xff")
     digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -50,7 +53,7 @@ def fixture(tmp_path, attempt_id="attempt-1", **kwargs):
         frozenset({"pilot-collector"}),
         "model",
         datetime.now(timezone.utc),
-        timedelta(seconds=30),
+        receipt_max_age,
     )
     wire = {
         k: getattr(context, k)
@@ -63,7 +66,9 @@ def fixture(tmp_path, attempt_id="attempt-1", **kwargs):
         )
     }
     wire.update(schema_version=1, criteria=[asdict(criterion)])
-    attempt = PilotAttempt(context, path, **kwargs)
+    attempt = PilotAttempt(
+        context, admit_snapshot(context, path, claim=SNAPSHOT_CLAIM), **kwargs
+    )
     sink = []
     adapter = IsolatedPilotAdapter(attempt, sink)
     event = MessageEvent(
@@ -103,8 +108,6 @@ async def test_real_positive_duplicate_and_distinct_attempts(tmp_path):
 @pytest.mark.parametrize(
     "case",
     [
-        "artifact",
-        "missing-artifact",
         "task_id",
         "attempt_id",
         "artifact_digest",
@@ -133,11 +136,7 @@ async def test_real_positive_duplicate_and_distinct_attempts(tmp_path):
 )
 async def test_negative_transport_and_artifact(tmp_path, case):
     adapter, event, wire, path = fixture(tmp_path)
-    if case == "artifact":
-        path.write_bytes(b"changed")
-    elif case == "missing-artifact":
-        path.unlink()
-    elif case in ("task_id", "attempt_id", "environment"):
+    if case in ("task_id", "attempt_id", "environment"):
         wire[case] = "wrong"
     elif case in ("artifact_digest", "approved_request_digest"):
         wire[case] = "sha256:" + "0" * 64
@@ -259,12 +258,10 @@ if case == 'malformed-outcome':
 sys.stdout.buffer.write(out)
 """
     adapter, event, wire, _ = fixture(
-        tmp_path, command=[sys.executable, "-I", "-c", program, root, case]
+        tmp_path,
+        command=[sys.executable, "-I", "-c", program, root, case],
+        receipt_max_age=timedelta(seconds=0.1 if case == "stale" else 30),
     )
-    if case == "stale":
-        adapter.attempt.context = replace(
-            adapter.attempt.context, receipt_max_age=timedelta(seconds=0.1)
-        )
     await deliver(adapter, event, wire)
     assert adapter.sink == [DENIED.encode()]
     assert adapter.attempt.process_returncode == 0
