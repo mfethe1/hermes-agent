@@ -8,7 +8,7 @@ Local implementation complete; fresh independent review required. This is an imp
 - Checkout: `/Users/mfethe/.hermes/worktrees/response-verification-001`.
 - Rejected baseline: `0b9101f9ad9406dc17985c7f8c555c83e2cc226f`; initial porcelain status empty.
 - Implementation and regression commit: `d9e0e47ebc6ed58a51f28c7638ccb1cf5e000f09`.
-- This report is committed separately; its parent is the implementation SHA above.
+- Initial report commit `87d36cc689426f2ace6ccc83764460d9abfc251b` has the implementation SHA above as its parent; subsequent report updates change documentation only.
 - Started 2026-09-09 19:10:17 UTC; code checkpoint committed within the 350-second budget after all required gates passed.
 - Fresh evidence directory: `/Users/mfethe/.scratch/response-verification-001-outer-fix-ryn7fwzm`.
 - Full prior independent `OUTER-REVIEW.md`, root/gateway instructions, and gstack review checklist read. Agent-context tools were not exposed; memory registry search had no relevant hits.
@@ -60,3 +60,29 @@ Fresh independent review must use the new implementation SHA and a new evidence 
 Authenticated admission/trusted-object integrity, artifact mutation/replacement at dispatch, durable/cross-instance replay, Lean, and fleet work remain OPEN. Detached process topologies, hostile handler-created tasks, threaded callback races, all cancellation interleavings, crash recovery, sustained resource limits, real reconnect adoption, asynchronous external acknowledgements, and other adapter/media surfaces remain unproven. No `/stop` runner integration or live activation is claimed.
 
 No live configuration/provider/credential/service/cron changes, dependency changes, delegation, push, merge, or deployment were performed. Mack remained the sole implementation owner.
+
+
+## Follow-up runtime verification gate — PASS
+
+The stop hook required launching and driving the real runtime surface beyond the suite. No `run` skill or Skill invocation tool was available after searching installed/local catalogs, so the same runtime requirement was performed directly with standalone Python probes. This pilot is unregistered and explicitly local; its real authorized surface is `OuterPilotLifecycle` with the production base outer coroutine, stream consumer, final delivery chain, and real worker/collector/evaluator subprocesses.
+
+Exact tested HEAD: `87d36cc689426f2ace6ccc83764460d9abfc251b`; implementation remains `d9e0e47ebc6ed58a51f28c7638ccb1cf5e000f09`. Fresh directory: `/Users/mfethe/.scratch/response-verification-001-runtime-mzcds6mi`.
+
+Copied retained probes into that new directory, updated only their copied SHA guards to the tested HEAD, and generated a fresh 12,318-file tracked-content baseline. Original probe hashes were checked unchanged afterward. The new manifest records provenance. These are implementer-run observations using retained probe logic, not new independent acceptance.
+
+Actual commands (each exit 0):
+
+```sh
+/opt/homebrew/bin/python3 -B /Users/mfethe/.scratch/response-verification-001-runtime-mzcds6mi/probes.py
+/opt/homebrew/bin/python3 -B /Users/mfethe/.scratch/response-verification-001-runtime-mzcds6mi/confirm.py
+/opt/homebrew/bin/python3 -B /Users/mfethe/.scratch/response-verification-001-runtime-mzcds6mi/runtime_outcomes.py
+```
+
+Observed **11/11**, **7/7**, and **3/3 PASS**, respectively: 21 scenario observations including repetitions. The first script's exit code alone is not a verdict; every persisted result row was separately checked PASS. Logs/results and `runtime-summary.json` are retained in the fresh directory.
+
+- Immediate stop and replacement: cancelled/done old task, no consumer entry, empty old session/task maps and sink.
+- Real successful worker/collector/evaluator: exit 0, actual receipt, exactly one COMPLETE at the sink, and `ProcessingOutcome.SUCCESS`.
+- Twelve concurrent duplicate deliveries during gated real verification: exactly one COMPLETE. Stale callbacks, raw consumer fallback, sink swaps and unsupported runner adoption remained contained.
+- Actual sink append raised after successful verification: hook FAILURE, empty sink, no fabricated SendResult.
+- Explicit stop during a live verifier: hook CANCELLED; unexpected cancellation: hook FAILURE. Observed verifier/descendant PIDs 116/117 and 128/130 respectively were alive before action and absent after joining; verifier return codes -9; session/task maps empty.
+- SHA, clean status and tracked hashes checked before/after scenarios. Runtime verification finished before this documentation-only update. Fresh independent review and activation authority remain outstanding.
