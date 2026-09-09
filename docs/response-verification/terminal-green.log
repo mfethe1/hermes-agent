@@ -1,0 +1,21 @@
+▶ skipping venv without pytest: /Users/mfethe/.hermes/hermes-agent/venv
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /opt/homebrew/bin/python3
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 2 test files (~21 tests) under ['tests/response_verification']; running with -j 20
+[ 42.9% |     9/~21 | ✓57 | ✗ 0] ✓ tests/response_verification/test_core.py (57✓, 2.4s)
+[100.0% |    21/~21 | ✓108 | ✗  0] ✓ tests/response_verification/test_pilot.py (51✓, 4.9s)
+
+=== Summary: 2 files, 108 tests passed, 0 failed (100% complete) in 4.9s (20 workers) ===
+  Durations cached to test_durations.json (2 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   2
+  Total subprocess CPU-wall: 7.3s  (runner wall: 4.9s, parallelism: 20x)
+  P50: 4.88s  P90: 4.88s  P95: 4.88s  P99: 4.88s  Max: 4.88s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+      4.88s  tests/response_verification/test_pilot.py
+      2.38s  tests/response_verification/test_core.py

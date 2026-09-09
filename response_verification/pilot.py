@@ -16,6 +16,17 @@ COMPLETE = "COMPLETE: Verified isolated artifact state."
 DENIED = "INCOMPLETE: Isolated artifact state could not be verified."
 
 
+async def settle_owned(task):
+    """Join retained work despite repeated caller cancellation; report interruption."""
+    joined = asyncio.gather(task, return_exceptions=True)
+    interrupted = False
+    while True:
+        try:
+            return (await asyncio.shield(joined))[0], interrupted
+        except asyncio.CancelledError:
+            interrupted = True
+
+
 class PilotAttempt:
     def __init__(self, context, artifact_path, *, timeout=2.0, command=None):
         self.context = context
@@ -32,8 +43,12 @@ class PilotAttempt:
         self.drafts = bytearray()
         self.failed = False
         self.process_returncode = None
+        self.terminal = False
+        self._active_task = None
 
     def buffer(self, draft):
+        if self.terminal:
+            return
         if type(draft) is not str or len(draft) > LIMIT:
             self.failed = True
             return
@@ -47,11 +62,32 @@ class PilotAttempt:
             return
         self.drafts.extend(data)
 
+    def close(self):
+        self.terminal = True
+        self.drafts.clear()
+
     def cancel(self):
         self.cancelled = True
+        self.close()
+        if self._active_task is not None and not self._active_task.done():
+            self._active_task.cancel()
+
+    async def cancel_and_join(self):
+        active = self._active_task
+        self.cancel()
+        if active is not None and active is not asyncio.current_task():
+            _, interrupted = await settle_owned(active)
+            if interrupted:
+                raise asyncio.CancelledError
 
     async def prepare(self, raw):
+        if self.terminal:
+            return
+        if self._active_task is not None:
+            raise ValueError("attempt already active")
+        self._active_task = asyncio.current_task()
         proc = None
+        launch = exchange_task = None
         try:
             self.envelope = decode_envelope(raw)
             context = asdict(self.context)
@@ -65,13 +101,16 @@ class PilotAttempt:
             }).encode()
             if len(job) > LIMIT:
                 raise ValueError("job size")
-            proc = await asyncio.create_subprocess_exec(
-                *self.command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
+            launch = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    *self.command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,
+                )
             )
+            proc = await asyncio.shield(launch)
 
             async def exchange():
                 proc.stdin.write(job)
@@ -86,7 +125,8 @@ class PilotAttempt:
                     raise ValueError("verifier exit")
                 return bytes(output)
 
-            output = await asyncio.wait_for(exchange(), self.timeout)
+            exchange_task = asyncio.create_task(exchange())
+            output = await asyncio.wait_for(asyncio.shield(exchange_task), self.timeout)
             self.receipt = decode_receipt(output)
         except asyncio.CancelledError:
             self.cancelled = True
@@ -94,15 +134,39 @@ class PilotAttempt:
         except Exception:
             self.failed = True
         finally:
-            if proc is not None:
-                # Kill the whole POSIX process group, including collector descendants.
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
-                self.process_returncode = proc.returncode
-            self.drafts.clear()
+            # Terminal state and buffers do not depend on any interruptible await.
+            self.close()
+            interrupted = False
+            try:
+                if exchange_task is not None:
+                    exchange_task.cancel()
+                    _, interrupted = await settle_owned(exchange_task)
+                if launch is not None and proc is None:
+                    result, cancelled = await settle_owned(launch)
+                    interrupted |= cancelled
+                    if not isinstance(result, BaseException):
+                        proc = result
+                if proc is not None:
+
+                    async def reap():
+                        # Only the group created with start_new_session above.
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        await proc.wait()
+                        self.process_returncode = proc.returncode
+
+                    result, cancelled = await settle_owned(asyncio.create_task(reap()))
+                    interrupted |= cancelled
+                    if isinstance(result, BaseException):
+                        raise result
+            finally:
+                self._active_task = None
+                self.close()
+            if interrupted:
+                self.cancelled = True
+                raise asyncio.CancelledError
 
     def disposition(self):
         if (

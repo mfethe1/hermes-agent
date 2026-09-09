@@ -1,0 +1,64 @@
+[
+  {
+    "command": [
+      "/Users/mfethe/.local/bin/ruff",
+      "check",
+      "--no-cache",
+      "response_verification",
+      "tests/response_verification",
+      "gateway/response_verification_pilot.py"
+    ],
+    "exit_code": 0,
+    "stdout": "All checks passed!\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/Users/mfethe/.local/bin/ruff",
+      "format",
+      "--check",
+      "--no-cache",
+      "response_verification",
+      "tests/response_verification",
+      "gateway/response_verification_pilot.py"
+    ],
+    "exit_code": 0,
+    "stdout": "8 files already formatted\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/opt/homebrew/bin/python3",
+      "-m",
+      "compileall",
+      "-q",
+      "response_verification",
+      "tests/response_verification",
+      "gateway/response_verification_pilot.py"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--cached",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]

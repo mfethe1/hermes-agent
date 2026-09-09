@@ -1,0 +1,112 @@
+▶ skipping venv without pytest: /Users/mfethe/.hermes/hermes-agent/venv
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /opt/homebrew/bin/python3
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 1 test files (~11 tests) under ['tests/response_verification/test_pilot.py']; running with -j 20
+[100.0% |    11/~11 | ✓0 | ✗5] ✗ tests/response_verification/test_pilot.py (5✗, 4.6s)
+
+  ╔╍ Failed: tests/response_verification/test_pilot.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║ E    +  where None = <response_verification.pilot.PilotAttempt object at 0x1100239d0>.process_returncode
+  ║ E    +    where <response_verification.pilot.PilotAttempt object at 0x1100239d0> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x110023b10>.attempt
+  ║
+  ║ During handling of the above exception, another exception occurred:
+  ║ tests/response_verification/test_pilot.py:407: in test_active_terminal_owns_real_process_tree
+  ║     os.killpg(ids[0], signal.SIGKILL)
+  ║ E   PermissionError: [Errno 1] Operation not permitted
+  ║ ___________ test_active_terminal_owns_real_process_tree[disconnect] ____________
+  ║ tests/response_verification/test_pilot.py:387: in test_active_terminal_owns_real_process_tree
+  ║     assert done, "terminal action must join active work promptly"
+  ║ E   AssertionError: terminal action must join active work promptly
+  ║ E   assert set()
+  ║ _____________ test_active_terminal_owns_real_process_tree[cancel] ______________
+  ║ tests/response_verification/test_pilot.py:387: in test_active_terminal_owns_real_process_tree
+  ║     assert done, "terminal action must join active work promptly"
+  ║ E   AssertionError: terminal action must join active work promptly
+  ║ E   assert set()
+  ║ __________________________ test_terminal_late_drafts ___________________________
+  ║ tests/response_verification/test_pilot.py:418: in test_terminal_late_drafts
+  ║     assert not adapter.attempt.drafts
+  ║ E   AssertionError: assert not bytearray(b'DRAFT_SENTINEL_899cab_DO_NOT_SEND')
+  ║ E    +  where bytearray(b'DRAFT_SENTINEL_899cab_DO_NOT_SEND') = <response_verification.pilot.PilotAttempt object at 0x110110640>.drafts
+  ║ E    +    where <response_verification.pilot.PilotAttempt object at 0x110110640> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x11011fb10>.attempt
+  ║ =========================== short test summary info ============================
+  ║ FAILED tests/response_verification/test_pilot.py::test_replacement_sinks_reject_owner
+  ║ FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[second-cancel]
+  ║ FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[disconnect]
+  ║ FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[cancel]
+  ║ FAILED tests/response_verification/test_pilot.py::test_terminal_late_drafts
+  ║ ======================= 5 failed, 44 deselected in 4.42s =======================
+  ║
+  ║  Repro: python -m pytest tests/response_verification/test_pilot.py -k terminal_late or active_terminal or replacement_sinks --tb=short
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 1 files, 0 tests passed, 5 failed (100% complete) in 4.6s (20 workers) ===
+  Durations cached to test_durations.json (1 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   1
+  Total subprocess CPU-wall: 4.6s  (runner wall: 4.6s, parallelism: 20x)
+  P50: 4.63s  P90: 4.63s  P95: 4.63s  P99: 4.63s  Max: 4.63s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+      4.63s  tests/response_verification/test_pilot.py
+
+=== Failure output ===
+
+--- tests/response_verification/test_pilot.py ---
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/mfethe/.hermes/worktrees/response-verification-001
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 49 items / 44 deselected / 5 selected
+
+tests/response_verification/test_pilot.py FFFFF                          [100%]
+
+=================================== FAILURES ===================================
+_____________________ test_replacement_sinks_reject_owner ______________________
+tests/response_verification/test_pilot.py:333: in test_replacement_sinks_reject_owner
+    with pytest.raises(ValueError, match="unsupported pilot owner"):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE <class 'ValueError'>
+__________ test_active_terminal_owns_real_process_tree[second-cancel] __________
+tests/response_verification/test_pilot.py:389: in test_active_terminal_owns_real_process_tree
+    assert adapter.attempt.process_returncode is not None
+E   assert None is not None
+E    +  where None = <response_verification.pilot.PilotAttempt object at 0x1100239d0>.process_returncode
+E    +    where <response_verification.pilot.PilotAttempt object at 0x1100239d0> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x110023b10>.attempt
+
+During handling of the above exception, another exception occurred:
+tests/response_verification/test_pilot.py:407: in test_active_terminal_owns_real_process_tree
+    os.killpg(ids[0], signal.SIGKILL)
+E   PermissionError: [Errno 1] Operation not permitted
+___________ test_active_terminal_owns_real_process_tree[disconnect] ____________
+tests/response_verification/test_pilot.py:387: in test_active_terminal_owns_real_process_tree
+    assert done, "terminal action must join active work promptly"
+E   AssertionError: terminal action must join active work promptly
+E   assert set()
+_____________ test_active_terminal_owns_real_process_tree[cancel] ______________
+tests/response_verification/test_pilot.py:387: in test_active_terminal_owns_real_process_tree
+    assert done, "terminal action must join active work promptly"
+E   AssertionError: terminal action must join active work promptly
+E   assert set()
+__________________________ test_terminal_late_drafts ___________________________
+tests/response_verification/test_pilot.py:418: in test_terminal_late_drafts
+    assert not adapter.attempt.drafts
+E   AssertionError: assert not bytearray(b'DRAFT_SENTINEL_899cab_DO_NOT_SEND')
+E    +  where bytearray(b'DRAFT_SENTINEL_899cab_DO_NOT_SEND') = <response_verification.pilot.PilotAttempt object at 0x110110640>.drafts
+E    +    where <response_verification.pilot.PilotAttempt object at 0x110110640> = <gateway.response_verification_pilot.IsolatedPilotAdapter object at 0x11011fb10>.attempt
+=========================== short test summary info ============================
+FAILED tests/response_verification/test_pilot.py::test_replacement_sinks_reject_owner
+FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[second-cancel]
+FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[disconnect]
+FAILED tests/response_verification/test_pilot.py::test_active_terminal_owns_real_process_tree[cancel]
+FAILED tests/response_verification/test_pilot.py::test_terminal_late_drafts
+======================= 5 failed, 44 deselected in 4.42s =======================
+
+=== 1 file with test failures (5 tests failed) ===
+  tests/response_verification/test_pilot.py  (5 tests failed)

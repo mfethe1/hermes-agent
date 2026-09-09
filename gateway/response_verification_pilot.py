@@ -27,7 +27,15 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
         return False
 
     async def disconnect(self):
-        self.attempt.cancel()
+        self._dispatched = True
+        await self.attempt.cancel_and_join()
+
+    def _final_delivery_adapter(self, source):
+        # This unregistered pilot has no authority to adopt a runner or replacement.
+        if self.gateway_runner is not None:
+            self.attempt.cancel()
+            raise ValueError("unsupported pilot owner/replacement relationship")
+        return self
 
     async def get_chat_info(self, chat_id):
         return {"name": "isolated pilot", "type": "dm"}
@@ -40,6 +48,7 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         if chat_id != self.chat_id or not self._sending:
             raise ValueError("outside controlled dispatch")
+        self._final_delivery_adapter(None)
         # No await between the boundary clock check and the synchronous test sink.
         payload = self.attempt.disposition()
         self.sink.append(payload.encode())
@@ -54,13 +63,15 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
             self._dispatched = (
                 True  # Consume before work, including cancellation/failure.
             )
-            self.attempt.buffer(draft)
-            await self.attempt.prepare(raw)
-            self._sending = True
             try:
+                self._final_delivery_adapter(event.source)
+                self.attempt.buffer(draft)
+                await self.attempt.prepare(raw)
+                self._sending = True
                 # Production entrypoint, real retry/transport chain; only fixed text enters it.
                 await self._send_final_text(
                     event, "isolated-pilot", DENIED, {}, True, 0, lambda result: None
                 )
             finally:
                 self._sending = False
+                self.attempt.close()
