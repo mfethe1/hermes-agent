@@ -1,0 +1,68 @@
+[
+  {
+    "command": [
+      "ruff",
+      "--version"
+    ],
+    "returncode": 0,
+    "stdout": "ruff 0.15.0\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "ruff",
+      "check",
+      "--no-cache",
+      "response_verification",
+      "tests/response_verification"
+    ],
+    "returncode": 0,
+    "stdout": "All checks passed!\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "ruff",
+      "format",
+      "--check",
+      "--no-cache",
+      "response_verification",
+      "tests/response_verification"
+    ],
+    "returncode": 0,
+    "stdout": "3 files already formatted\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "returncode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/opt/homebrew/bin/python3.14",
+      "-B",
+      "-c",
+      "from pathlib import Path; import sys; files=list(Path('response_verification').glob('*.py'))+list(Path('tests/response_verification').glob('*.py')); [compile(p.read_bytes(),str(p),'exec') for p in files]; print(sys.version); print('compiled in memory:',len(files),'files')"
+    ],
+    "returncode": 0,
+    "stdout": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 17.0.0 (clang-1700.6.4.2)]\ncompiled in memory: 3 files\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/Users/mfethe/.hermes/hermes-agent/venv/bin/python",
+      "-B",
+      "-c",
+      "from pathlib import Path; import sys; files=list(Path('response_verification').glob('*.py'))+list(Path('tests/response_verification').glob('*.py')); [compile(p.read_bytes(),str(p),'exec') for p in files]; print(sys.version); print('compiled in memory:',len(files),'files')"
+    ],
+    "returncode": 0,
+    "stdout": "3.11.15 (main, Aug  7 2026, 02:15:53) [Clang 22.1.3 ]\ncompiled in memory: 3 files\n",
+    "stderr": ""
+  }
+]

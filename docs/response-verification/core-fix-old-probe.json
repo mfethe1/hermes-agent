@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/opt/homebrew/bin/python3",
+    "-B",
+    "/Users/mfethe/.scratch/response-verification-001-review/probe_core.py"
+  ],
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"/Users/mfethe/.scratch/response-verification-001-review/probe_core.py\", line 51, in <module>\n    check('age boundary '+str(i),mutate_receipt(bundle(),i,observed_at=NOW-timedelta(minutes=10)),'complete')\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/mfethe/.scratch/response-verification-001-review/probe_core.py\", line 35, in check\n    row['expected_observed']=expected; assert actual==expected,(name,row); results.append(row)\n                                              ^^^^^^^^^^^^^^^^\nAssertionError: ('age boundary 2', {'name': 'age boundary 2', 'actual': 'incomplete', 'reasons': ['read_back_precedes_effect'], 'rendered': 'STATUS: Completion is not verified; required trusted evidence is incomplete.', 'expected_observed': 'complete'})\n",
+  "scratch_sha256": {
+    "/Users/mfethe/.scratch/response-verification-001-review/CORE-REVIEW.md": "7bab3b333de328ad5687ad3d14b0468613fd9eb487494497b54b1624630d256e",
+    "/Users/mfethe/.scratch/response-verification-001-review/probe_core.py": "16ee1c2f7e29639b8a504132678af38f19e10743575900aa547542e7772b9bc0"
+  },
+  "unchanged": true
+}

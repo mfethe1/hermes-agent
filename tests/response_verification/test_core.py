@@ -355,3 +355,134 @@ def test_adversarial_input_denies_completion_and_releases_only_fixed_status(
     }
     assert "attacker-task" not in rendered
     assert "prod-rosie" not in rendered
+
+
+@pytest.mark.parametrize("offset_us", [-1, 0, 1])
+@pytest.mark.parametrize("zone", [timezone.utc, timezone(timedelta(hours=-4))])
+def test_read_back_must_not_predate_effect(offset_us: int, zone) -> None:
+    context, envelope, receipts = _valid_bundle()
+    bundle = _replace_receipt(
+        (context, envelope, receipts),
+        2,
+        observed_at=(
+            receipts[1].observed_at + timedelta(microseconds=offset_us)
+        ).astimezone(zone),
+    )
+    decision = evaluate_completion(*bundle)
+    assert decision.eligible is (offset_us >= 0)
+    if offset_us < 0:
+        assert ReasonCode.READ_BACK_PRECEDES_EFFECT in decision.reasons
+        assert decision.accepted_receipt_hashes == ()
+        assert not render_status(decision).startswith("COMPLETE:")
+
+
+@pytest.mark.parametrize("value", ["verified", "failed", "unknown", "pending"])
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_foreign_outcome_enum_is_never_admitted(value: str, index: int) -> None:
+    from enum import Enum
+
+    foreign = Enum("CollectorOutcome", {"VALUE": value}, type=str).VALUE
+    context, envelope, receipts = _replace_receipt(
+        _valid_bundle(), index, outcome=foreign
+    )
+    if index == 1:
+        context, envelope, receipts = _replace_receipt(
+            (context, envelope, receipts),
+            2,
+            related_receipt_hash=receipts[1].content_hash,
+        )
+    decision = evaluate_completion(context, envelope, receipts)
+    assert not decision.eligible
+    assert ReasonCode.RECEIPT_SCHEMA_INVALID in decision.reasons
+    assert decision.accepted_receipt_hashes == ()
+    assert not render_status(decision).startswith("COMPLETE:")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status"),
+    [
+        (EvidenceOutcome.VERIFIED, CompletionStatus.COMPLETE),
+        (EvidenceOutcome.FAILED, CompletionStatus.INCOMPLETE),
+        (EvidenceOutcome.UNKNOWN, CompletionStatus.UNKNOWN),
+    ],
+)
+def test_exact_effect_outcome_controls_completion(outcome, status) -> None:
+    context, envelope, receipts = _replace_receipt(_valid_bundle(), 1, outcome=outcome)
+    bundle = _replace_receipt(
+        (context, envelope, receipts),
+        2,
+        related_receipt_hash=receipts[1].content_hash,
+    )
+    decision = evaluate_completion(*bundle)
+    assert decision.status is status
+    if outcome is EvidenceOutcome.UNKNOWN:
+        assert ReasonCode.EXTERNAL_EFFECT_UNKNOWN in decision.reasons
+
+
+@pytest.mark.parametrize("shape", ["criterion", "timestamp", "context_id"])
+def test_reported_malformed_inputs_return_controlled_denial(shape: str) -> None:
+    context, envelope, receipts = _valid_bundle()
+    if shape == "criterion":
+        envelope = replace(envelope, criteria=({"criterion_id": "tests-pass"},))
+    elif shape == "timestamp":
+        receipts = (replace(receipts[0], observed_at="yesterday"),) + receipts[1:]
+    else:
+        context = replace(context, task_id=None)
+    decision = evaluate_completion(context, envelope, receipts)
+    assert not decision.eligible
+    assert decision.accepted_receipt_hashes == ()
+    assert not render_status(decision).startswith("COMPLETE:")
+
+
+@pytest.mark.parametrize("field", ["origin", "evidence_kind", "outcome"])
+@pytest.mark.parametrize("foreign_enum", [False, True])
+def test_receipt_enum_schema_rejects_strings_and_foreign_enums(field, foreign_enum):
+    from enum import Enum
+
+    context, envelope, receipts = _valid_bundle()
+    value = getattr(receipts[1], field).value
+    if foreign_enum:
+        value = Enum("Foreign", {"VALUE": value}, type=str).VALUE
+    # Schema denial must occur even before an integrity hash can be relied on.
+    receipts = receipts[:1] + (replace(receipts[1], **{field: value}),) + receipts[2:]
+    decision = evaluate_completion(context, envelope, receipts)
+    assert not decision.eligible
+    assert ReasonCode.RECEIPT_SCHEMA_INVALID in decision.reasons
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_criterion_kind_requires_exact_runtime_enum(trusted):
+    from enum import Enum
+
+    context, envelope, receipts = _valid_bundle()
+    foreign = Enum("ForeignKind", {"STATE": "state"}, type=str).STATE
+    criteria = (replace(context.criteria[0], kind=foreign),) + context.criteria[1:]
+    if trusted:
+        context = replace(context, criteria=criteria)
+    else:
+        envelope = replace(envelope, criteria=criteria)
+    decision = evaluate_completion(context, envelope, receipts)
+    assert not decision.eligible
+    assert (
+        ReasonCode.TRUST_CONTEXT_INVALID if trusted else ReasonCode.CRITERIA_MISMATCH
+    ) in decision.reasons
+
+
+@pytest.mark.parametrize("extra_us", [0, 1])
+def test_age_limit_is_inclusive_when_effect_and_read_back_share_instant(extra_us):
+    context, envelope, receipts = _valid_bundle()
+    observed = (
+        context.evaluated_at
+        - context.receipt_max_age
+        - timedelta(microseconds=extra_us)
+    )
+    receipts = tuple(
+        with_receipt_hash(replace(r, observed_at=observed)) for r in receipts
+    )
+    bundle = _replace_receipt(
+        (context, envelope, receipts), 2, related_receipt_hash=receipts[1].content_hash
+    )
+    decision = evaluate_completion(*bundle)
+    assert decision.eligible is (extra_us == 0)
+    if extra_us:
+        assert ReasonCode.RECEIPT_STALE in decision.reasons

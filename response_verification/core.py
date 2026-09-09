@@ -62,6 +62,7 @@ class ReasonCode(str, Enum):
     MISSING_EVIDENCE = "missing_evidence"
     DUPLICATE_EVIDENCE = "duplicate_evidence"
     UNEXPECTED_EVIDENCE = "unexpected_evidence"
+    RECEIPT_SCHEMA_INVALID = "receipt_schema_invalid"
     RECEIPT_HASH_INVALID = "receipt_hash_invalid"
     RECEIPT_TIME_INVALID = "receipt_time_invalid"
     RECEIPT_STALE = "receipt_stale"
@@ -72,6 +73,7 @@ class ReasonCode(str, Enum):
     EXTERNAL_EFFECT_UNKNOWN = "external_effect_unknown"
     READ_BACK_MISSING = "read_back_missing"
     READ_BACK_MISMATCH = "read_back_mismatch"
+    READ_BACK_PRECEDES_EFFECT = "read_back_precedes_effect"
 
 
 @dataclass(frozen=True)
@@ -220,14 +222,62 @@ def with_receipt_hash(receipt: TrustedReceipt) -> TrustedReceipt:
 
 
 def _valid_identifier(value: str) -> bool:
-    return bool(_IDENTIFIER.fullmatch(value))
+    return isinstance(value, str) and bool(_IDENTIFIER.fullmatch(value))
 
 
 def _valid_digest(value: str) -> bool:
-    return bool(_DIGEST.fullmatch(value))
+    return isinstance(value, str) and bool(_DIGEST.fullmatch(value))
+
+
+def _aware_datetime(value: object) -> bool:
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
+
+
+def _valid_criteria(criteria: object) -> bool:
+    return isinstance(criteria, tuple) and all(
+        isinstance(item, CriterionReference)
+        and _valid_identifier(item.criterion_id)
+        and _valid_digest(item.criterion_digest)
+        and type(item.kind) is CriterionKind
+        for item in criteria
+    )
+
+
+def _valid_receipt_schema(receipt: TrustedReceipt) -> bool:
+    return (
+        isinstance(receipt, TrustedReceipt)
+        and type(receipt.origin) is EvidenceOrigin
+        and type(receipt.evidence_kind) is EvidenceKind
+        and type(receipt.outcome) is EvidenceOutcome
+        and all(
+            isinstance(getattr(receipt, field), str)
+            for field in (
+                "receipt_id",
+                "issuer",
+                "task_id",
+                "attempt_id",
+                "artifact_digest",
+                "environment",
+                "approved_request_digest",
+                "criterion_id",
+                "criterion_digest",
+                "content_hash",
+            )
+        )
+        and (
+            receipt.related_receipt_hash is None
+            or isinstance(receipt.related_receipt_hash, str)
+        )
+    )
 
 
 def _valid_context(context: ApprovedContext) -> bool:
+    if not isinstance(context, ApprovedContext):
+        return False
     identifiers = (
         context.task_id,
         context.attempt_id,
@@ -237,9 +287,14 @@ def _valid_context(context: ApprovedContext) -> bool:
     )
     if not all(_valid_identifier(value) for value in identifiers):
         return False
-    if not context.criteria or context.receipt_max_age <= timedelta(0):
+    if (
+        not _valid_criteria(context.criteria)
+        or not context.criteria
+        or not isinstance(context.receipt_max_age, timedelta)
+        or context.receipt_max_age <= timedelta(0)
+    ):
         return False
-    if context.evaluated_at.tzinfo is None or context.evaluated_at.utcoffset() is None:
+    if not _aware_datetime(context.evaluated_at):
         return False
     if not _valid_digest(context.artifact_digest):
         return False
@@ -248,17 +303,12 @@ def _valid_context(context: ApprovedContext) -> bool:
     criterion_ids = [item.criterion_id for item in context.criteria]
     if len(set(criterion_ids)) != len(criterion_ids):
         return False
-    if any(
-        not _valid_identifier(item.criterion_id)
-        or not _valid_digest(item.criterion_digest)
-        or not isinstance(item.kind, CriterionKind)
-        for item in context.criteria
-    ):
-        return False
     if approved_request_digest(context.criteria) != context.approved_request_digest:
         return False
-    return bool(context.trusted_issuers) and all(
-        _valid_identifier(issuer) for issuer in context.trusted_issuers
+    return (
+        isinstance(context.trusted_issuers, frozenset)
+        and bool(context.trusted_issuers)
+        and all(_valid_identifier(issuer) for issuer in context.trusted_issuers)
     )
 
 
@@ -294,6 +344,8 @@ def _criteria_reasons(
 ) -> set[ReasonCode]:
     if envelope.criteria is None:
         return {ReasonCode.MISSING_CRITERIA}
+    if not _valid_criteria(envelope.criteria):
+        return {ReasonCode.CRITERIA_MISMATCH}
     if not envelope.criteria:
         return {ReasonCode.EMPTY_CRITERIA}
     ids = [item.criterion_id for item in envelope.criteria]
@@ -318,6 +370,12 @@ def _receipt_reasons(
     receipt_hashes: set[str] = set()
 
     for receipt in receipts:
+        if not _valid_receipt_schema(receipt):
+            reasons.add(ReasonCode.RECEIPT_SCHEMA_INVALID)
+            continue
+        if not _aware_datetime(receipt.observed_at):
+            reasons.add(ReasonCode.RECEIPT_TIME_INVALID)
+            continue
         if receipt.receipt_id in receipt_ids or receipt.content_hash in receipt_hashes:
             reasons.add(ReasonCode.DUPLICATE_EVIDENCE)
         receipt_ids.add(receipt.receipt_id)
@@ -357,17 +415,13 @@ def _receipt_reasons(
             if receipt.content_hash != expected_hash:
                 reasons.add(ReasonCode.RECEIPT_HASH_INVALID)
 
-        if (
-            receipt.observed_at.tzinfo is None
-            or receipt.observed_at.utcoffset() is None
-        ):
+        age = context.evaluated_at.astimezone(
+            timezone.utc
+        ) - receipt.observed_at.astimezone(timezone.utc)
+        if age < timedelta(0):
             reasons.add(ReasonCode.RECEIPT_TIME_INVALID)
-        else:
-            age = context.evaluated_at - receipt.observed_at
-            if age < timedelta(0):
-                reasons.add(ReasonCode.RECEIPT_TIME_INVALID)
-            elif age > context.receipt_max_age:
-                reasons.add(ReasonCode.RECEIPT_STALE)
+        elif age > context.receipt_max_age:
+            reasons.add(ReasonCode.RECEIPT_STALE)
 
     for criterion_id, criterion in criteria.items():
         evidence = by_criterion[criterion_id]
@@ -405,13 +459,19 @@ def _receipt_reasons(
             reasons.add(ReasonCode.UNEXPECTED_EVIDENCE)
         if any(item.outcome is EvidenceOutcome.UNKNOWN for item in effects):
             reasons.add(ReasonCode.EXTERNAL_EFFECT_UNKNOWN)
-        if any(item.outcome is EvidenceOutcome.FAILED for item in effects):
+        if any(item.outcome is not EvidenceOutcome.VERIFIED for item in effects):
             reasons.add(ReasonCode.EVIDENCE_NOT_VERIFIED)
         if any(item.outcome is not EvidenceOutcome.VERIFIED for item in read_backs):
             reasons.add(ReasonCode.EVIDENCE_NOT_VERIFIED)
         if len(effects) == 1 and len(read_backs) == 1:
             if read_backs[0].related_receipt_hash != effects[0].content_hash:
                 reasons.add(ReasonCode.READ_BACK_MISMATCH)
+            # Equality is allowed at the receipt's microsecond precision. The
+            # collector still owns causal association at finer resolutions.
+            effect_time = effects[0].observed_at.astimezone(timezone.utc)
+            read_back_time = read_backs[0].observed_at.astimezone(timezone.utc)
+            if read_back_time < effect_time:
+                reasons.add(ReasonCode.READ_BACK_PRECEDES_EFFECT)
 
     accepted = tuple(sorted(receipt_hashes)) if not reasons else ()
     return reasons, accepted
