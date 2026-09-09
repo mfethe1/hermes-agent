@@ -30,9 +30,11 @@ satisfies this contract by itself; their legacy behavior remains unchanged.
 
 Only `StopResult.state == "stopped"` permits a later installation transaction.
 That result requires authoritative whole-service absence with admission and
-respawn still fenced. An old PID exiting is insufficient: an unknown manager
-state waits until timeout, and a replacement identity refuses without signaling
-the replacement. `refused`, `timed_out` and `unknown` forbid installation and
+respawn still fenced. After a TERM request, an old PID exiting with service-stop
+confirmation still missing waits until timeout only while every other guard
+remains valid. Unknown ownership, admission or respawn fencing refuses immediately;
+observation errors return `unknown`. A replacement identity refuses without
+signaling the replacement. `refused`, `timed_out` and `unknown` forbid installation and
 retain fences. Timeout does not kill a survivor; the requested cooperative exit
 may still finish later. A lost acknowledgement must be reconciled without replay.
 `term_attempted` records entry into the signal boundary, including refused or
