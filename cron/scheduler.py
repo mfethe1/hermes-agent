@@ -3639,17 +3639,46 @@ def _sweep_mcp_orphans() -> None:
 
 def _process_due_job(job: dict, adapters, loop, verbose: bool) -> bool:
     """Run one due job via the shared ``run_one_job`` body."""
-    # Claim only when the worker actually starts, so a queued lease can't expire first.
-    claimed = claim_job_for_fire(job["id"], return_job=True)
+    # Claim only when the worker actually starts, so a queued lease can't expire first. Pass the
+    # dispatch snapshot's occurrence explicitly: tick() already ran advance_next_runs, so the
+    # persisted record no longer carries the trigger_job manual marker (nor the fired slot), and
+    # re-deriving from it would dedupe a manual run against the NEXT slot (#79531).
+    claimed = claim_job_for_fire(
+        job["id"], return_job=True, occurrence=job.get("_scheduled_instant"))
     if not claimed:
-        finish_execution(
-            job["execution_id"], success=False, error="Fire claim lost; execution was not started.")
+        reason = _describe_refused_claim(job)
+        logger.warning("Job '%s' (%s): %s", job.get("name", job["id"]), job["id"], reason)
+        finish_execution(job["execution_id"], success=False, error=reason)
         return True
     # CAS returns the persisted record; bool fallback only for older test doubles.
     claimed_job = dict(claimed) if isinstance(claimed, dict) else dict(job)
     claimed_job["execution_id"] = job["execution_id"]
     claimed_job["_scheduled_instant"] = job.get("_scheduled_instant")
     return run_one_job(claimed_job, adapters=adapters, loop=loop, verbose=verbose)
+
+
+def _describe_refused_claim(job: dict) -> str:
+    """Best-effort, secret-free reason for a refused dispatch claim (execution audit row + log).
+    Re-reads the record AFTER the refusal; races can change it, so wording stays hedged."""
+    from cron.jobs import (
+        FIRE_CLAIM_TTL_SECONDS, _claim_is_live, get_job, is_job_runnable, is_terminal_job)
+
+    refreshed = get_job(job["id"])
+    if refreshed is None:
+        return "Fire claim refused: job no longer exists; execution was not started."
+    if is_terminal_job(refreshed):
+        return f"Fire claim refused: job is {refreshed.get('state')} (terminal); execution was not started."
+    if not is_job_runnable(refreshed):
+        return "Fire claim refused: job is paused/disabled; execution was not started."
+    if _claim_is_live(refreshed.get("fire_claim"), _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
+        return "Fire claim refused: another fire holds a live claim; execution was not started."
+    from cron.occurrences import completed_occurrence
+
+    instant = job.get("_scheduled_instant")
+    if instant and completed_occurrence(refreshed, instant):
+        return (f"Fire claim refused: scheduled occurrence {instant} is recorded completed; "
+                "execution was not started.")
+    return "Fire claim refused; execution was not started."
 
 
 def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, process_job):

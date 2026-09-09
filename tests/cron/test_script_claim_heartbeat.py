@@ -531,7 +531,12 @@ def test_heartbeat_thread_start_failure_does_not_start_execution(monkeypatch):
 def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
     """Store uncertainty cannot let a run outlive its last confirmed lease forever."""
     import cron.scheduler as scheduler
-    from cron import scheduler_script as sched_script
+    from types import SimpleNamespace
+
+    elapsed = iter([0.0, 0.02, 0.04])
+    # Control elapsed lease time, not OS thread scheduling within a 30ms window.
+    monkeypatch.setattr(scheduler, "time", SimpleNamespace(
+        **{**vars(scheduler.time), "monotonic": lambda: next(elapsed)}))
 
     calls = 0
 
@@ -543,7 +548,7 @@ def test_repeated_heartbeat_errors_cancel_after_bounded_grace(monkeypatch):
         raise OSError("store unavailable")
 
     def run_body(_job, **kwargs):
-        assert kwargs["fire_claim_lost"].wait(timeout=0.5)
+        assert kwargs["fire_claim_lost"].wait(timeout=2)
         return True
 
     job = {
