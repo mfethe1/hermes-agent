@@ -16,17 +16,21 @@ import contextlib
 import functools
 import json
 import logging
+import os
+import stat
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from gateway.memory_status import _parse_iso
 from hermes_constants import get_hermes_home
-from utils import atomic_json_write
 
 _log = logging.getLogger(__name__)
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
+_OPERATOR_CANCEL = object()
 # Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a leaked
 # marker can cause. Long drains refresh the marker instead of raising this.
 # Max-age fallback for a same-epoch orphaned marker (#85433). Long-running drains refresh the marker via
@@ -61,35 +65,138 @@ def drain_request_path(home: Optional[Path] = None) -> Path:
     return Path(home if home is not None else get_hermes_home()) / _DRAIN_REQUEST_FILENAME
 
 
+@contextlib.contextmanager
+def _mutation_lock(home: Optional[Path]):
+    """Persistent sibling inode; ALL cooperating mutations must hold this lock.
+
+    Never delete/replace the lock file. Noncooperating writers (including older
+    runtimes) are outside this contract. Contention/errors raise before mutation.
+    """
+    path = drain_request_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or lock_path.is_symlink():
+            raise OSError("Unsafe drain lock inode")
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = lock_path.stat()
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("Drain lock inode replaced")
+        try:
+            marker = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(marker.st_mode) or marker.st_nlink != 1:
+                raise OSError("Unsafe drain marker inode")
+        yield path
+    finally:
+        # Closing releases the OS lock, including on interrupted mutation.
+        os.close(fd)
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name != "nt":
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _publish(path: Path, payload: dict[str, Any]) -> None:
+    # Strict same-directory replace: generic atomic_json_write can fall back to
+    # in-place writes on some filesystems, unsuitable for lock-free drain readers.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".drain-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        _sync_directory(path.parent)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+
+
+def _payload(principal: str, suppress_notification: bool) -> dict[str, Any]:
+    return {
+        "action": "drain", "requested_at": datetime.now(timezone.utc).isoformat(), "principal": principal,
+        "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
+        "request_id": uuid.uuid4().hex,
+    }
+
+
 def write_drain_request(
     *, principal: str = "drain-control", suppress_notification: bool = False, home: Optional[Path] = None
 ) -> dict[str, Any]:
-    """Write the begin-drain marker atomically; returns the payload.
+    """Explicit operator replacement, including a fresh ownership identity.
 
-    Re-writing refreshes ``requested_at`` (keep-alive past the max-age).
-    ``suppress_notification`` skips ONLY the home-channel "gateway shutting down"
-    broadcast (the per-session interrupt ping is never suppressed); which drains
-    are quiet is the caller's policy.  Stamped with the instantiation epoch so a
-    copy surviving a machine restart on the durable volume reads as stale.
+    Backward-compatible dashboard begin/keep-alive. Automated controllers must
+    use create_drain_request / refresh_drain_request instead of replacing owners.
     """
-    payload = {
-        "action": "drain", "requested_at": datetime.now(timezone.utc).isoformat(), "principal": principal,
-        "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
-    }
-    atomic_json_write(drain_request_path(home), payload)
-    return payload
+    with _mutation_lock(home) as path:
+        payload = _payload(principal, suppress_notification)
+        _publish(path, payload)
+        return payload
 
 
-def clear_drain_request(*, home: Optional[Path] = None) -> bool:
-    """Remove the drain marker (cancel-drain, idempotent). Returns True if one existed."""
-    path = drain_request_path(home)
-    try:
-        path.unlink()
+def create_drain_request(
+    *, principal: str = "drain-control", suppress_notification: bool = False, home: Optional[Path] = None
+) -> Optional[dict[str, Any]]:
+    """Claim an absent marker; never adopt even an expired or malformed marker."""
+    with _mutation_lock(home) as path:
+        if read_drain_request(home=home) is not None:
+            return None
+        payload = _payload(principal, suppress_notification)
+        _publish(path, payload)
+        return payload
+
+
+def _validate_request_id(request_id: str) -> None:
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("request_id must be a nonempty string")
+
+
+def refresh_drain_request(*, request_id: str, home: Optional[Path] = None) -> Optional[dict[str, Any]]:
+    """Refresh only the matching owner, retaining identity and notification policy."""
+    _validate_request_id(request_id)
+    with _mutation_lock(home) as path:
+        body = read_drain_request(home=home)
+        if not body or body.get("action") != "drain" or body.get("request_id") != request_id:
+            return None
+        body.update(requested_at=datetime.now(timezone.utc).isoformat(), epoch=current_instantiation_epoch())
+        _publish(path, body)
+        return body
+
+
+def clear_drain_request(*, home: Optional[Path] = None, request_id: Any = _OPERATOR_CANCEL) -> bool:
+    """Cancel under the shared lock. With an ID, clear only that exact owner.
+
+    Omitting request_id retains explicit operator cancel semantics. Lock/I/O
+    failures raise: callers must not mistake failure for successful cancellation.
+    """
+    if request_id is not _OPERATOR_CANCEL:
+        _validate_request_id(request_id)
+    with _mutation_lock(home) as path:
+        if request_id is not _OPERATOR_CANCEL:
+            body = read_drain_request(home=home)
+            if not body or body.get("action") != "drain" or body.get("request_id") != request_id:
+                return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        _sync_directory(path.parent)
         return True
-    except OSError as e:
-        if not isinstance(e, FileNotFoundError):
-            _log.warning("drain-control: failed to remove %s: %s", path, e)
-        return False
 
 
 def _marker_is_expired(body: dict[str, Any]) -> bool:
@@ -165,10 +272,11 @@ def read_drain_request(*, home: Optional[Path] = None) -> Optional[dict[str, Any
     path = drain_request_path(home)
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as e:
-        if not isinstance(e, FileNotFoundError):
-            _log.warning("drain-control: failed to read %s: %s", path, e)
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeError) as e:
+        _log.warning("drain-control: failed to read %s: %s", path, e)
+        return {}
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):

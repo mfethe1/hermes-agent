@@ -169,6 +169,8 @@ async def gateway_drain(request: Request):
     principal = getattr(getattr(request.state, "token_principal", None), "principal", None) or "dashboard"
 
     if action == "cancel":
+        # Explicit authenticated operator override; the helper still takes the
+        # shared mutation lock. Controllers must pass their request_id instead.
         existed = clear_drain_request()
         _log.info("Gateway drain CANCEL requested by %s (existed=%s)", principal, existed)
         return {"ok": True, "action": "cancel", "was_draining": existed}
