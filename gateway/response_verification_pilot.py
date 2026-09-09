@@ -54,7 +54,7 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
         self.sink.append(payload.encode())
         return SendResult(success=True, message_id="isolated-dispatch")
 
-    async def deliver(self, event, raw, draft=""):
+    async def deliver(self, event, raw, draft="", *, record_delivery=None):
         if event.source.chat_id != self.chat_id:
             raise ValueError("outside pilot scope")
         async with self._dispatch_lock:
@@ -70,7 +70,15 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
                 self._sending = True
                 # Production entrypoint, real retry/transport chain; only fixed text enters it.
                 await self._send_final_text(
-                    event, "isolated-pilot", DENIED, {}, True, 0, lambda result: None
+                    event,
+                    "isolated-pilot",
+                    DENIED,
+                    {},
+                    True,
+                    0,
+                    record_delivery
+                    if record_delivery is not None
+                    else lambda result: None,
                 )
             finally:
                 self._sending = False
@@ -101,6 +109,7 @@ class OuterPilotLifecycle:
             self.active = adapter
             adapter._start_session_processing(event, "isolated-outer")
             adapter.outer_task = adapter._session_tasks["isolated-outer"]
+            adapter.outer_guard = adapter._active_sessions["isolated-outer"]
             return adapter
 
     async def stop(self):
@@ -116,7 +125,7 @@ class _OuterPilotAdapter(IsolatedPilotAdapter):
         self.selected_destination = (self, event.source.chat_id, sink)
         self.raw = raw
         self.handler = handler
-        self.outer_task = self.consumer_task = self.consumer = None
+        self.outer_task = self.outer_guard = self.consumer_task = self.consumer = None
         self.closed = False
         self.draft_seen = asyncio.Event()
         self._message_handler = self._handle_local
@@ -152,11 +161,28 @@ class _OuterPilotAdapter(IsolatedPilotAdapter):
         await self.send_draft(chat_id, 1, content, metadata)
         return SendResult(success=True)
 
-    async def _send_final_text(self, event, *args, **kwargs):
+    async def _send_final_text(
+        self,
+        event,
+        session_key,
+        text_content,
+        metadata,
+        is_ephemeral_response,
+        ephemeral_ttl,
+        record_delivery,
+    ):
         if self._sending:
-            return await super()._send_final_text(event, *args, **kwargs)
+            return await super()._send_final_text(
+                event,
+                session_key,
+                text_content,
+                metadata,
+                is_ephemeral_response,
+                ephemeral_ttl,
+                record_delivery,
+            )
         if self.current():
-            await self.deliver(event, self.raw)
+            await self.deliver(event, self.raw, record_delivery=record_delivery)
 
     async def _handle_local(self, event):
         from gateway.platforms.base import EphemeralReply
@@ -208,10 +234,18 @@ class _OuterPilotAdapter(IsolatedPilotAdapter):
 
         self.closed = True
         self._dispatched = True
+        if self.outer_task is not None and not self.outer_task.done():
+            # Mark before attempt.cancel(), which can also cancel the outer task.
+            self._expected_cancelled_tasks.add(self.outer_task)
         self.attempt.cancel()
         if self.outer_task is not None:
             self.outer_task.cancel()
             await settle_owned(self.outer_task)
+            # A task cancelled before entry cannot execute the base finally.
+            # Reconcile only this task and its captured guard after joining.
+            if self._session_tasks.get("isolated-outer") is self.outer_task:
+                self._session_tasks.pop("isolated-outer")
+                self._release_session_guard("isolated-outer", guard=self.outer_guard)
         await self.attempt.cancel_and_join()
 
     async def disconnect(self):

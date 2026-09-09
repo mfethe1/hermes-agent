@@ -477,6 +477,7 @@ async def test_real_outer_lifecycle_success_and_stale_callback(tmp_path):
 async def test_outer_active_verifier_lifecycle(tmp_path, action):
     import subprocess
     from types import SimpleNamespace
+    from gateway.platforms.event import ProcessingOutcome
     from gateway.response_verification_pilot import OuterPilotLifecycle
 
     ready = tmp_path / "outer-ready"
@@ -503,6 +504,12 @@ time.sleep(60)
     adapter = await owner.start(
         base.attempt, base.sink, event, json.dumps(wire).encode(), handler
     )
+    outcomes = []
+
+    async def completed(event, outcome):
+        outcomes.append(outcome)
+
+    adapter.on_processing_complete = completed
     try:
         async with asyncio.timeout(4):
             while not ready.exists():
@@ -543,6 +550,11 @@ time.sleep(60)
         )
         assert adapter.consumer._queue.empty() and not adapter.consumer._accumulated
         assert not base.sink
+        assert outcomes == [
+            ProcessingOutcome.FAILURE
+            if action == "reconnect"
+            else ProcessingOutcome.CANCELLED
+        ]
         assert SENTINEL.encode() not in b"".join(base.sink + replacement_sink)
         async with asyncio.timeout(3):
             while any(
@@ -648,3 +660,208 @@ async def test_ordinary_outer_adapter_keeps_handler_final(tmp_path):
     await task
     assert adapter.sink == ["Ordinary local handler final"]
     assert not adapter._active_sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["stop", "replace"])
+async def test_outer_prestart_reconciles_exact_ownership(tmp_path, action):
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    owner = OuterPilotLifecycle()
+    base, event, wire, _ = fixture(tmp_path)
+    other, event2, wire2, _ = fixture(tmp_path, "prestart-new")
+    entered = []
+    release = asyncio.Event()
+
+    async def handler(event, delta):
+        entered.append(event)
+        await release.wait()
+        return SENTINEL
+
+    old = await owner.start(
+        base.attempt, base.sink, event, json.dumps(wire).encode(), handler
+    )
+    # Deliberately no yield between start and stop/replacement.
+    if action == "stop":
+        await owner.stop()
+    else:
+        new = await owner.start(
+            other.attempt, other.sink, event2, json.dumps(wire2).encode(), handler
+        )
+    try:
+        assert not old._active_sessions and not old._session_tasks
+        assert old.outer_task.cancelled() and old.consumer is None
+        assert base.attempt.terminal and base.attempt._active_task is None
+        assert not base.sink and not base.attempt.drafts
+        assert event not in entered
+        if action == "replace":
+            guard = new._active_sessions["isolated-outer"]
+            await asyncio.gather(old.stop(), old.stop())
+            assert owner.active is new
+            assert new._active_sessions["isolated-outer"] is guard
+            assert new._session_tasks["isolated-outer"] is new.outer_task
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["success", "sink-failure", "handler-failure", "stop", "unexpected-cancel"]
+)
+async def test_outer_reports_actual_delivery_and_cancellation(tmp_path, mode):
+    from gateway.platforms.event import ProcessingOutcome
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    class FailingSink(list):
+        def append(self, value):
+            raise OSError("controlled local transport failed")
+
+    base, event, wire, _ = fixture(tmp_path)
+    owner = OuterPilotLifecycle()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    outcomes, callbacks = [], []
+
+    async def handler(event, delta):
+        callbacks.append(delta)
+        delta(SENTINEL)
+        entered.set()
+        await release.wait()
+        if mode == "handler-failure":
+            raise RuntimeError("local handler failed")
+        return SENTINEL
+
+    sink = FailingSink() if mode == "sink-failure" else base.sink
+    adapter = await owner.start(
+        base.attempt, sink, event, json.dumps(wire).encode(), handler
+    )
+
+    async def completed(event, outcome):
+        outcomes.append(outcome)
+
+    adapter.on_processing_complete = completed
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        if mode == "stop":
+            await owner.stop()
+        elif mode == "unexpected-cancel":
+            adapter.outer_task.cancel()
+        else:
+            release.set()
+        await asyncio.gather(adapter.outer_task, return_exceptions=True)
+        expected = {
+            "success": ProcessingOutcome.SUCCESS,
+            "stop": ProcessingOutcome.CANCELLED,
+        }.get(mode, ProcessingOutcome.FAILURE)
+        assert outcomes == [expected]
+        if mode in ("success", "sink-failure"):
+            assert base.attempt.process_returncode == 0
+            assert base.attempt.receipt is not None
+        assert sink == ([COMPLETE.encode()] if mode == "success" else [])
+        callbacks[0](SENTINEL)
+        duplicate_results = []
+        await asyncio.gather(
+            *(
+                adapter._send_final_text(
+                    event,
+                    "isolated-outer",
+                    SENTINEL,
+                    {},
+                    True,
+                    0,
+                    duplicate_results.append,
+                )
+                for _ in range(12)
+            )
+        )
+        assert duplicate_results == [] and outcomes == [expected]
+        assert not adapter._active_sessions and not adapter._session_tasks
+        assert adapter.consumer._queue.empty() and not base.attempt.drafts
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap", ["guard", "task", "both"])
+async def test_outer_stop_preserves_reassigned_session_entries(tmp_path, swap):
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    base, event, wire, _ = fixture(tmp_path)
+    owner = OuterPilotLifecycle()
+
+    async def handler(event, delta):
+        pytest.fail("prestart cancellation must not enter handler")
+
+    old = await owner.start(base.attempt, [], event, json.dumps(wire).encode(), handler)
+    replacement_guard = asyncio.Event()
+    replacement_task = asyncio.create_task(asyncio.Event().wait())
+    original_guard = old._active_sessions["isolated-outer"]
+    if swap in ("guard", "both"):
+        old._active_sessions["isolated-outer"] = replacement_guard
+    if swap in ("task", "both"):
+        old._session_tasks["isolated-outer"] = replacement_task
+    try:
+        await old.stop()
+        assert old._active_sessions["isolated-outer"] is (
+            original_guard if swap == "task" else replacement_guard
+        )
+        if swap == "guard":
+            assert not old._session_tasks
+        else:
+            assert old._session_tasks["isolated-outer"] is replacement_task
+        assert not replacement_task.done()
+    finally:
+        replacement_task.cancel()
+        await asyncio.gather(replacement_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_outer_concurrent_replacements_keep_only_latest_owner(tmp_path):
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    owner = OuterPilotLifecycle()
+    release = asyncio.Event()
+    callbacks = []
+
+    async def handler(event, delta):
+        callbacks.append(delta)
+        delta(SENTINEL)
+        await release.wait()
+        return SENTINEL
+
+    bases = [fixture(tmp_path, f"concurrent-{i}") for i in range(12)]
+    adapters = await asyncio.gather(
+        *(
+            owner.start(
+                base.attempt, base.sink, event, json.dumps(wire).encode(), handler
+            )
+            for base, event, wire, _ in bases
+        )
+    )
+    latest = owner.active
+    try:
+        retired = [adapter for adapter in adapters if adapter is not latest]
+        assert len(retired) == 11
+        assert all(adapter.outer_task.done() for adapter in retired)
+        assert all(
+            not adapter._active_sessions and not adapter._session_tasks
+            for adapter in retired
+        )
+        guard = latest._active_sessions["isolated-outer"]
+        await asyncio.gather(*(adapter.stop() for adapter in retired))
+        assert owner.active is latest
+        assert latest._active_sessions["isolated-outer"] is guard
+        assert latest._session_tasks["isolated-outer"] is latest.outer_task
+        assert not latest.outer_task.done()
+        release.set()
+        await asyncio.wait_for(latest.outer_task, 4)
+        for callback in callbacks:
+            callback(SENTINEL)
+        assert latest.sink == [COMPLETE.encode()]
+        assert latest.attempt.process_returncode == 0
+        assert all(
+            not adapter.sink and not adapter.attempt.drafts for adapter in retired
+        )
+        assert latest.consumer._queue.empty()
+    finally:
+        await owner.stop()
