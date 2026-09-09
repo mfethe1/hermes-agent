@@ -187,7 +187,7 @@ class _OuterPilotAdapter(IsolatedPilotAdapter):
     async def _handle_local(self, event):
         from gateway.platforms.base import EphemeralReply
         from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-        from response_verification.pilot import settle_owned
+        from response_verification.pilot_cleanup import settle_owned
 
         self.consumer = GatewayStreamConsumer(
             self,
@@ -230,7 +230,7 @@ class _OuterPilotAdapter(IsolatedPilotAdapter):
             self.attempt.close()
 
     async def stop(self):
-        from response_verification.pilot import settle_owned
+        from response_verification.pilot_cleanup import settle_owned
 
         self.closed = True
         self._dispatched = True

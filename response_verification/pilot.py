@@ -1,41 +1,55 @@
 """Single attempt, process-local pilot boundary; no production registration."""
 
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
-import os
+import logging
+import math
 from pathlib import Path
-import signal
 import sys
 
 from response_verification.core import evaluate_completion
 from response_verification.admission import SnapshotAdmission, context_wire
 from response_verification.pilot_wire import LIMIT, decode_envelope, decode_receipt
+from response_verification.pilot_cleanup import (
+    CLEANUP_TIMEOUT,
+    CleanupStatus,
+    cleanup_process,
+    settle_owned,
+)
 
 COMPLETE = "COMPLETE: Verified admitted snapshot bytes only."
 DENIED = "INCOMPLETE: Admitted snapshot could not be verified."
 
 
-async def settle_owned(task):
-    """Join retained work despite repeated caller cancellation; report interruption."""
-    joined = asyncio.gather(task, return_exceptions=True)
-    interrupted = False
-    while True:
-        try:
-            return (await asyncio.shield(joined))[0], interrupted
-        except asyncio.CancelledError:
-            interrupted = True
+logger = logging.getLogger(__name__)
 
 
 class PilotAttempt:
-    def __init__(self, context, admission, *, timeout=2.0, command=None):
+    def __init__(
+        self,
+        context,
+        admission,
+        *,
+        timeout=2.0,
+        command=None,
+        cleanup_timeout=CLEANUP_TIMEOUT,
+    ):
+        for value, maximum in ((timeout, 60), (cleanup_timeout, CLEANUP_TIMEOUT)):
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or not 0 < value <= maximum
+            ):
+                raise ValueError("invalid bounded pilot timeout")
         if type(admission) is not SnapshotAdmission:
             raise ValueError("explicit snapshot admission required")
         admission.validate(context)
         self._admission = admission
         self._context = admission.context
         self.timeout = timeout
+        self.cleanup_timeout = cleanup_timeout
         self.command = command or [
             sys.executable,
             "-I",
@@ -49,6 +63,33 @@ class PilotAttempt:
         self.process_returncode = None
         self.terminal = False
         self._active_task = None
+        self.cleanup = CleanupStatus()
+        self._launch_task = self._cleanup_task = None
+
+    async def _cleanup_process(self, proc):
+        try:
+            await cleanup_process(proc, self.cleanup, timeout=self.cleanup_timeout)
+        finally:
+            self.process_returncode = proc.returncode
+            if not self.cleanup.verified:
+                self.failed = True
+                logger.warning(
+                    "pilot cleanup incomplete: %s", json.dumps(asdict(self.cleanup))
+                )
+
+    def _late_launch(self, task):
+        # A timed-out launch remains owned. A late handle gets bounded cleanup,
+        # but can never restore this failed/cancelled attempt's eligibility.
+        if task.cancelled():
+            return
+        try:
+            proc = task.result()
+        except Exception:
+            return
+        self._cleanup_task = asyncio.create_task(self._cleanup_process(proc))
+        self._cleanup_task.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
 
     @property
     def context(self):
@@ -95,6 +136,8 @@ class PilotAttempt:
         self.cancel()
         if active is not None and active is not asyncio.current_task():
             _, interrupted = await settle_owned(active)
+            if not active.done():
+                self.failed = True
             if interrupted:
                 raise asyncio.CancelledError
 
@@ -125,7 +168,9 @@ class PilotAttempt:
                     start_new_session=True,
                 )
             )
-            proc = await asyncio.shield(launch)
+            self._launch_task = launch
+            self.cleanup.child = "launch-pending"
+            proc = await asyncio.wait_for(asyncio.shield(launch), self.timeout)
 
             async def exchange():
                 proc.stdin.write(job)
@@ -155,27 +200,34 @@ class PilotAttempt:
             try:
                 if exchange_task is not None:
                     exchange_task.cancel()
-                    _, interrupted = await settle_owned(exchange_task)
+                    result, interrupted = await settle_owned(exchange_task)
+                    if isinstance(result, TimeoutError):
+                        self.failed = True
                 if launch is not None and proc is None:
-                    result, cancelled = await settle_owned(launch)
+                    result, cancelled = await settle_owned(
+                        launch, cancel_on_timeout=False
+                    )
                     interrupted |= cancelled
-                    if not isinstance(result, BaseException):
+                    if not launch.done():
+                        self.failed = True
+                        self.cleanup.deadline_expired = True
+                        launch.add_done_callback(self._late_launch)
+                        logger.warning(
+                            "pilot cleanup incomplete: %s",
+                            json.dumps(asdict(self.cleanup)),
+                        )
+                    elif not isinstance(result, BaseException):
                         proc = result
                 if proc is not None:
-
-                    async def reap():
-                        # Only the group created with start_new_session above.
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        await proc.wait()
-                        self.process_returncode = proc.returncode
-
-                    result, cancelled = await settle_owned(asyncio.create_task(reap()))
+                    self._cleanup_task = asyncio.create_task(
+                        self._cleanup_process(proc)
+                    )
+                    result, cancelled = await settle_owned(
+                        self._cleanup_task, timeout=self.cleanup_timeout + 0.5
+                    )
                     interrupted |= cancelled
                     if isinstance(result, BaseException):
-                        raise result
+                        self.failed = True
             finally:
                 self._active_task = None
                 self.close()
@@ -189,6 +241,7 @@ class PilotAttempt:
             or self.failed
             or self.envelope is None
             or self.receipt is None
+            or not self.cleanup.verified
         ):
             return DENIED
         try:
