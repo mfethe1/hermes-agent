@@ -26,11 +26,11 @@ class Blocked(RuntimeError):
     pass
 
 
-def native_preflight(plist: Path) -> dict:
+def native_preflight(plist: Path, *, reported_disable_exit_code: int | None = None) -> dict:
     """Read configuration only. Configuration never proves a runtime fence."""
     missing = [
         'native atomic identity/owner/quiescence TERM boundary unavailable',
-        'maintained launchd respawn fence unavailable',
+        'maintained launchd respawn fence unavailable; disable does not fence loaded-job respawn',
         'authoritative whole-service conversation/API/cron quiescence unavailable',
         'installed owner-token writers and synchronous startup admission unverified',
         'complete install/rollback/start/health adapter not accepted',
@@ -47,7 +47,8 @@ def native_preflight(plist: Path) -> dict:
     except (OSError, ValueError, TypeError) as exc:
         missing.append(f'service metadata unavailable: {type(exc).__name__}')
     return {'ready': False, 'install_enabled': False, 'missing_capabilities': missing,
-            'service': service}
+            'service': service, 'reported_disable_exit_code': reported_disable_exit_code,
+            'respawn_fenced': False}
 
 
 def _save(path, body):
