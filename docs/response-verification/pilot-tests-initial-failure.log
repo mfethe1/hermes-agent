@@ -1,0 +1,282 @@
+▶ skipping venv without pytest: /Users/mfethe/.hermes/hermes-agent/venv
+▶ no local venv — using Nix dev venv via HERMES_PYTHON: /opt/homebrew/bin/python3
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 2 test files (~13 tests) under ['tests/response_verification']; running with -j 20
+[ 69.2% |     9/~13 | ✓57 | ✗ 0] ✓ tests/response_verification/test_core.py (57✓, 0.4s)
+[100.0% |    13/~13 | ✓75 | ✗16] ✗ tests/response_verification/test_pilot.py (18✓ 16✗, 5.3s)
+
+  ╔╍ Failed: tests/response_verification/test_pilot.py ╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+  ║     os.killpg(proc.pid, signal.SIGKILL)
+  ║ tests/conftest.py:1400: in _guarded_killpg
+  ║     raise RuntimeError(
+  ║ E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70455, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+  ║ _____________________ test_dispatch_clock_cancel_and_scope _____________________
+  ║ tests/response_verification/test_pilot.py:198: in test_dispatch_clock_cancel_and_scope
+  ║     await adapter.attempt.prepare(json.dumps(wire).encode())
+  ║ response_verification/pilot.py:95: in prepare
+  ║     os.killpg(proc.pid, signal.SIGKILL)
+  ║ tests/conftest.py:1400: in _guarded_killpg
+  ║     raise RuntimeError(
+  ║ E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70456, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+  ║ =========================== short test summary info ============================
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_positive_duplicate_and_distinct_attempts
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[artifact]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[missing-artifact]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[task_id]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[attempt_id]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[artifact_digest]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[environment]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[approved_request_digest]
+  ║ FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[criterion]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[raise RuntimeError("crash")]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[import sys; sys.exit(4)]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("{")]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("{\\"schema_version\\":1,\\"decision\\":\\"COMPLETE\\"}")]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("x" * 20000)]
+  ║ FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[import time; time.sleep(5); print("late COMPLETE")]
+  ║ FAILED tests/response_verification/test_pilot.py::test_dispatch_clock_cancel_and_scope
+  ║ ======================== 16 failed, 18 passed in 2.37s =========================
+  ║
+  ║  Repro: python -m pytest tests/response_verification/test_pilot.py --tb=short
+  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍
+
+
+=== Summary: 2 files, 75 tests passed, 16 failed (100% complete) in 5.3s (20 workers) ===
+  Durations cached to test_durations.json (2 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   2
+  Total subprocess CPU-wall: 5.7s  (runner wall: 5.3s, parallelism: 20x)
+  P50: 5.28s  P90: 5.28s  P95: 5.28s  P99: 5.28s  Max: 5.28s
+  <1s: 1 files (50%)  <2s: 1 files (50%)
+  Top 10 slowest:
+      5.28s  tests/response_verification/test_pilot.py
+      0.43s  tests/response_verification/test_core.py
+
+=== Failure output ===
+
+--- tests/response_verification/test_pilot.py ---
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/mfethe/.hermes/worktrees/response-verification-001
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 34 items
+
+tests/response_verification/test_pilot.py FFFFFFFFF..................FFF [ 88%]
+FFFF                                                                     [100%]
+
+=================================== FAILURES ===================================
+______________ test_real_positive_duplicate_and_distinct_attempts ______________
+tests/response_verification/test_pilot.py:85: in test_real_positive_duplicate_and_distinct_attempts
+    await asyncio.gather(
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70430, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+________________ test_negative_transport_and_artifact[artifact] ________________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70432, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+____________ test_negative_transport_and_artifact[missing-artifact] ____________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70434, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+________________ test_negative_transport_and_artifact[task_id] _________________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70436, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_______________ test_negative_transport_and_artifact[attempt_id] _______________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70438, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+____________ test_negative_transport_and_artifact[artifact_digest] _____________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70440, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+______________ test_negative_transport_and_artifact[environment] _______________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70442, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+________ test_negative_transport_and_artifact[approved_request_digest] _________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70444, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_______________ test_negative_transport_and_artifact[criterion] ________________
+tests/response_verification/test_pilot.py:169: in test_negative_transport_and_artifact
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70446, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+___________ test_real_verifier_failures[raise RuntimeError("crash")] ___________
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70450, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_____________ test_real_verifier_failures[import sys; sys.exit(4)] _____________
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70451, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+___________________ test_real_verifier_failures[print("{")] ____________________
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70452, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_ test_real_verifier_failures[print("{\\"schema_version\\":1,\\"decision\\":\\"COMPLETE\\"}")] _
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70453, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_______________ test_real_verifier_failures[print("x" * 20000)] ________________
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70454, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_ test_real_verifier_failures[import time; time.sleep(5); print("late COMPLETE")] _
+tests/response_verification/test_pilot.py:189: in test_real_verifier_failures
+    await deliver(adapter, event, wire)
+tests/response_verification/test_pilot.py:76: in deliver
+    await adapter.deliver(event, raw, SENTINEL)
+gateway/response_verification_pilot.py:58: in deliver
+    await self.attempt.prepare(raw)
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70455, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+_____________________ test_dispatch_clock_cancel_and_scope _____________________
+tests/response_verification/test_pilot.py:198: in test_dispatch_clock_cancel_and_scope
+    await adapter.attempt.prepare(json.dumps(wire).encode())
+response_verification/pilot.py:95: in prepare
+    os.killpg(proc.pid, signal.SIGKILL)
+tests/conftest.py:1400: in _guarded_killpg
+    raise RuntimeError(
+E   RuntimeError: tests/conftest.py live-system guard: blocked os.killpg(70456, 9) — PGID is outside the test process group. See _live_system_guard for the why.
+=========================== short test summary info ============================
+FAILED tests/response_verification/test_pilot.py::test_real_positive_duplicate_and_distinct_attempts
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[artifact]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[missing-artifact]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[task_id]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[attempt_id]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[artifact_digest]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[environment]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[approved_request_digest]
+FAILED tests/response_verification/test_pilot.py::test_negative_transport_and_artifact[criterion]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[raise RuntimeError("crash")]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[import sys; sys.exit(4)]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("{")]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("{\\"schema_version\\":1,\\"decision\\":\\"COMPLETE\\"}")]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[print("x" * 20000)]
+FAILED tests/response_verification/test_pilot.py::test_real_verifier_failures[import time; time.sleep(5); print("late COMPLETE")]
+FAILED tests/response_verification/test_pilot.py::test_dispatch_clock_cancel_and_scope
+======================== 16 failed, 18 passed in 2.37s =========================
+
+=== 1 file with test failures (16 tests failed) ===
+  tests/response_verification/test_pilot.py  (16 tests failed)

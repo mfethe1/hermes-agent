@@ -1,0 +1,40 @@
+{
+  "wire": {
+    "task_id": "pilot-task",
+    "attempt_id": "attempt-runtime",
+    "artifact_digest": "sha256:a23e485893c54b7904ae8988e9dea85dc46cd60f96548dee5769669143d690ca",
+    "environment": "isolated-local",
+    "approved_request_digest": "sha256:de3f511f6d54a821146779e7288c2d304703ec3634a9aa852786514cad7582bc",
+    "schema_version": 1,
+    "criteria": [
+      {
+        "criterion_id": "bytes-match",
+        "criterion_digest": "sha256:218c3cec582b96cea188d5c1ac913b8458abad10cac7ae186a4af8bd37937f6e",
+        "kind": "state"
+      }
+    ]
+  },
+  "receipt": {
+    "receipt_id": "local-observation",
+    "issuer": "pilot-collector",
+    "origin": "independent_collector",
+    "observed_at": "2026-09-09 18:38:25.743868+00:00",
+    "task_id": "pilot-task",
+    "attempt_id": "attempt-runtime",
+    "artifact_digest": "sha256:a23e485893c54b7904ae8988e9dea85dc46cd60f96548dee5769669143d690ca",
+    "environment": "isolated-local",
+    "approved_request_digest": "sha256:de3f511f6d54a821146779e7288c2d304703ec3634a9aa852786514cad7582bc",
+    "criterion_id": "bytes-match",
+    "criterion_digest": "sha256:218c3cec582b96cea188d5c1ac913b8458abad10cac7ae186a4af8bd37937f6e",
+    "evidence_kind": "observation",
+    "outcome": "verified",
+    "related_receipt_hash": null,
+    "content_hash": "sha256:4cb37e9c67edb0b7bb4bf058eab8ee9d7ac7b5c10a312161fc77363a447e9357"
+  },
+  "process_returncode": 0,
+  "send_count": 1,
+  "sink_payloads": [
+    "COMPLETE: Verified isolated artifact state."
+  ],
+  "sentinel_bytes": 0
+}
