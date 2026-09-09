@@ -2490,8 +2490,13 @@ def _machine_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
+_UNSET: Any = object()
+"""Sentinel for :func:`claim_job_for_fire` ``occurrence``: omitted keeps the legacy derivation."""
+
+
 def claim_job_for_fire(
     job_id: str, *, claim_ttl_seconds: int = FIRE_CLAIM_TTL_SECONDS, force: bool = False, return_job: bool = False,
+    occurrence: Any = _UNSET,
 ) -> Union[bool, Dict[str, Any]]:
     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
     caller won (``CronScheduler.fire_due``: exactly one of N replicas runs a job). Under the
@@ -2500,7 +2505,16 @@ def claim_job_for_fire(
     stale callback cannot resurrect a paused job). Lose if a claim younger than
     ``claim_ttl_seconds`` exists (the TTL lets another fire reclaim after a crash; mark_job_run
     clears the claim). Otherwise stamp ``fire_claim`` and, for recurring jobs, advance
-    ``next_run_at`` so a stale re-delivery cannot re-fire."""
+    ``next_run_at`` so a stale re-delivery cannot re-fire.
+
+    ``occurrence`` fixes the identity of the fire being claimed. Omitted: derive it from the
+    persisted record (``manual_run_at == next_run_at`` -> manual, else the stored ``next_run_at``
+    slot) — the external-provider path, whose record has not been touched since dispatch.
+    Explicit ``None``: a manual/run-now fire that must never be deduped against, nor consume, a
+    scheduled slot (tool/CLI ``run``). Explicit ISO string: the exact scheduled instant the caller
+    snapshotted at dispatch (the built-in tick, whose ``advance_next_runs`` rewrites
+    ``next_run_at`` — and so erases the trigger_job marker — BEFORE the worker claims). The
+    completed-occurrence dedupe still applies to an explicit scheduled instant."""
     def apply(jobs, _i, job):
         if is_terminal_job(job) and not _is_recoverable_error_job(job):
             return False
@@ -2513,9 +2527,19 @@ def claim_job_for_fire(
             return False  # someone holds a fresh claim
         from cron.occurrences import completed_occurrence, scheduled_instant
 
-        manual = force or job.get("manual_run_at") == job.get("next_run_at")
-        instant = None if manual else scheduled_instant(job.get("next_run_at"))
+        if force or occurrence is None:
+            instant = None
+        elif occurrence is _UNSET:
+            manual = job.get("manual_run_at") == job.get("next_run_at")
+            instant = None if manual else scheduled_instant(job.get("next_run_at"))
+        else:
+            instant = scheduled_instant(occurrence)
+            if instant is None:
+                raise ValueError("explicit occurrence must be a timezone-aware ISO instant or None")
         if instant and completed_occurrence(job, instant):
+            logger.info(
+                "Job '%s' (%s): refusing fire claim — scheduled occurrence %s already completed",
+                job.get("name", job_id), job_id, instant)
             if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
                 nxt = compute_next_run(job["schedule"], now.isoformat())
                 if nxt:

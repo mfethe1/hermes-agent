@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from hermes_constants import display_hermes_home
+from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,9 @@ _CRON_RUN_HEARTBEAT_CEILING = 6 * 3600.0
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import (
+    FIRE_CLAIM_TTL_SECONDS,
     AmbiguousJobReference,
+    _claim_is_live,
     claim_job_for_fire,
     get_job,
     is_job_runnable,
@@ -181,10 +184,13 @@ _ALREADY_RUNNING_ERROR = (
 
 def _claim_for_manual_run(job_id: str, log_label: str):
     """At-most-once claim shared by the sync and background run paths: ``(claimed_job, None)`` or
-    ``(None, error_dict)`` in the ``_execute_job_now`` shape. A lost claim is labelled precisely —
-    claim_job_for_fire also returns False for paused/disabled/missing jobs, not just in-flight ones."""
+    ``(None, error_dict)`` in the ``_execute_job_now`` shape. The claim is an explicit MANUAL
+    occurrence (``occurrence=None``): a run-now must never borrow the upcoming scheduled slot's
+    identity — that stamped the slot completed and made the scheduler skip it (#79531). A lost
+    claim is labelled precisely — claim_job_for_fire also returns False for paused/disabled/missing
+    jobs, not just in-flight ones."""
     try:
-        claimed_job = claim_job_for_fire(job_id, return_job=True)
+        claimed_job = claim_job_for_fire(job_id, return_job=True, occurrence=None)
         if isinstance(claimed_job, dict):
             return claimed_job, None
         refreshed = get_job(job_id)
@@ -192,8 +198,10 @@ def _claim_for_manual_run(job_id: str, log_label: str):
             reason = "Job no longer exists; nothing to run."
         elif not is_job_runnable(refreshed):
             reason = "Job is paused/disabled; resume it before running."
-        else:
+        elif _claim_is_live(refreshed.get("fire_claim"), _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
             reason = "Job is already being fired by the scheduler; not run again."
+        else:
+            reason = "Job could not be claimed for a manual run (claim refused); not run."
         return None, {"claimed": False, "success": False, "error": reason}
     except Exception as e:
         logger.error("Failed to claim cron job %s for %s: %s", job_id, log_label, e)
