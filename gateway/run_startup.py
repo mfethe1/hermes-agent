@@ -509,6 +509,9 @@ class GatewayStartupMixin:
         ``_is_resume_pending`` injection path owns the wording). Sessions whose adapter is offline stay
         ``resume_pending`` for the reconnect watcher, which re-calls this scoped to that ``platform``;
         sessions with a running agent are skipped so none is resumed twice."""
+        # Leave durable resume markers untouched until admission reopens.
+        if self._external_drain_active or self._draining:
+            return 0
         from gateway.run import _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window
         window = _auto_continue_freshness_window()
         candidates = self._resume_pending_candidates(platform)
@@ -1309,6 +1312,11 @@ class GatewayStartupMixin:
 
     async def start(self) -> bool:
         """Start the gateway and all configured platform adapters."""
+        # Read before the first await: adapters may admit work as soon as they
+        # connect, well before the background drain watcher gets its first tick.
+        from gateway.drain_control import drain_requested
+        if drain_requested():
+            self._enter_external_drain()
         logger.info("Starting Hermes Gateway...")
         self._start_install_faulthandler()
         self._start_log_startup_environment()
@@ -1357,7 +1365,7 @@ class GatewayStartupMixin:
         self._wire_teams_pipeline_runtime()
         self._running = True
         self._install_plugin_message_injector()
-        self._update_runtime_status("running")
+        self._update_runtime_status("draining" if self._external_drain_active else "running")
         await self._start_finish_wiring(connected_count)
         self._start_spawn_background_watchers()
         logger.info("Press Ctrl+C to stop")
