@@ -5,6 +5,7 @@ where the cross-process case spawns a child interpreter.
 """
 import os
 import sys
+import time
 
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if os.path.isdir(os.path.join(_root, "response_verification")):
@@ -34,7 +35,7 @@ def _intent(d, owner, payload=b"p"):
     key = content_key("t1", "a1", "dest", payload)
     DurableDispatcher(d, owner).ledger._append(
         {"dispatch_id": "dc1", "content_key": key, "phase": "intent",
-         "outcome": None, "owner": owner, "ts": 0.0}
+         "outcome": None, "owner": owner, "ts": time.time()}
     )
     return key
 
@@ -130,22 +131,26 @@ def test_intent_storage_refused_no_send():
 
 # ---------- torn tail ----------
 
-def test_torn_tail_holds_unknown():
+def test_torn_tail_fails_closed():
     d = _tmp()
     _intent(d, "w1")
     with open(os.path.join(d, JOURNAL), "a") as f:
         f.write('{"phase": "outco')  # torn write from crash
     st = DurableDispatcher(d, "w2").dispatch("dc1", "t1", "a1", "dest", b"p", delivered)
-    assert st == DispatchStatus.UNKNOWN_HOLD, st
+    # torn line anywhere in the store is unattributable ambiguity: refuse
+    assert st == DispatchStatus.STORAGE_REFUSED, st
 
 
 # ---------- attempt / destination scoping ----------
 
-def test_different_attempt_new_dispatch():
+def test_different_attempt_same_logical_blocked():
     d = _tmp()
     a = DurableDispatcher(d, "w1").dispatch("dc1", "t1", "a1", "dest", b"p", delivered)
     b = DurableDispatcher(d, "w1").dispatch("dc2", "t1", "a2", "dest", b"p", delivered)
-    assert a == DispatchStatus.DELIVERED and b == DispatchStatus.DELIVERED, (a, b)
+    # same task+destination+payload, relabeled attempt: logical dedupe must
+    # not silently resend (contract: separate logical key from attempt identity)
+    assert a == DispatchStatus.DELIVERED, a
+    assert b == DispatchStatus.DUPLICATE_BLOCKED, b
 
 
 def test_different_destination_new_dispatch():

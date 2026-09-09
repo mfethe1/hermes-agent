@@ -1,0 +1,17 @@
+PASS LOGICAL_KEY_SEPARATE_FROM_ATTEMPT: attempt-a2 status=DUPLICATE_BLOCKED sends=1 (contract: new attempt must not silently resend same logical response; got 1 sends)
+PASS CORRUPT_STORE_FAILS_CLOSED: status=STORAGE_REFUSED sends=0 (contract: corrupt store must block without fabricated receipts)
+PASS CRASH_AFTER_INTENT_NO_RESEND: child_rc=3 sends=0 out=STATUS UNKNOWN_HOLD
+PASS CRASH_AFTER_SEND_NO_SECOND_SEND: first_rc=7 restart_rc=3 sends=1 (must stay 1, unknown durable)
+PASS CROSS_PROCESS_DUPLICATE_BLOCKED: rcs=(0,3) sends=1 (exactly one send across processes)
+PASS DUPLICATE_BLOCKED_DISTINCT_ALLOWED: a=DELIVERED b=DUPLICATE_BLOCKED c=DELIVERED sends=2
+PASS EXPIRED_EVIDENCE_HOLD: status=EXPIRED_EVIDENCE_HOLD sends=0 (contract: expired evidence denies dispatch with explicit expired state; module never emits EXPIRED_EVIDENCE_HOLD)
+PASS UNUSABLE_LOCK_NO_SEND: raised IsADirectoryError, sends=0 (crash, but no send/no receipt)
+PASS NO_ACK_UNKNOWN: status=UNKNOWN_HOLD (None ack must hold unknown)
+PASS OUTCOME_STORAGE_FAILURE: status=UNKNOWN_HOLD phases=['intent', 'outcome', 'outcome'] sends=1 (sent but never claimed delivered)
+PASS OWNERSHIP_CONFLICT_NO_SEND: owner-b status=UNKNOWN_HOLD sends=0 (stale/foreign owner ambiguity must not send)
+PASS STORAGE_REFUSED_NO_SEND: status=STORAGE_REFUSED sends=0 (no send without durable intent)
+PASS TORN_TAIL_ONLY: status=STORAGE_REFUSED sends=0 (contract: corrupt/torn store must fail closed, no send)
+PASS TRANSPORT_EXCEPTION_UNKNOWN: status=UNKNOWN_HOLD (must be unknown_hold, never success)
+PASS UNKNOWN_SURVIVES_RESTARTS: restart_rcs=[3, 3, 3] sends=0 (no automatic resend across restarts)
+
+15/15 passed
