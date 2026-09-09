@@ -144,21 +144,17 @@ def test_crash_controller_loss_and_invalid_store_fail_closed(tmp_path):
     assert second.ready["closed"] and not second.ready["stop_latched"]
     assert not second.send("begin")["accepted"]
     assert not second.send("open", incarnation=first.ready["incarnation"])["accepted"]
-    assert second.send("open")["accepted"]
-    second.process.stdin.close()  # actual controller channel disappearance
+    assert second.ready["active_work"] == 1
+    assert second.ready["unresolved_prior_work"] == 1
+    assert not second.send("open")["accepted"]
+    assert second.send("stop")["active_work"] == 1
+    second.process.stdin.close()  # EOF is not completion
     second.join(2)
     third = Child(store)
-    assert third.ready["closed"]
-    assert third.send("open")["accepted"]
-    assert third.send("begin")["accepted"]
-    assert third.send("stop")["stop_latched"]
-    third.process.kill()  # crash with durable stop and active reservation
-    third.join(-9)
-    fourth = Child(store)
-    assert fourth.ready["stop_latched"] and fourth.ready["closed"]
-    assert not fourth.send("begin")["accepted"]
-    assert fourth.send("stop")["accepted"]
-    fourth.join(0)
+    assert third.ready["closed"] and third.ready["stop_latched"]
+    assert third.send("stop")["active_work"] == 1
+    third.process.stdin.close()
+    third.join(2)
     (store / "barrier.json").write_text('{"closed": false}')
     invalid = Child(store)
     assert invalid.ready is None
@@ -188,5 +184,6 @@ def test_crash_controller_loss_and_invalid_store_fail_closed(tmp_path):
     recovered = Child(lost_store)
     assert recovered.ready["stop_latched"] and recovered.ready["closed"]
     assert not recovered.send("open")["accepted"]
-    assert recovered.send("stop")["accepted"]
-    recovered.join(0)
+    assert recovered.send("stop")["active_work"] == 1
+    recovered.process.stdin.close()
+    recovered.join(2)

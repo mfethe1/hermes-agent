@@ -6,6 +6,7 @@ This consumer reserves local work only; it is not a native StopBoundary adapter.
 """
 
 import argparse
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -27,11 +28,12 @@ def provision(store: Path, owner: str):
     _save(
         store / "barrier.json",
         {
-            "version": 1,
+            "version": 2,
             "owner": owner,
             "incarnation": None,
             "closed": True,
             "stop_latched": False,
+            "reservations": {},
         },
     )
 
@@ -59,9 +61,8 @@ class CooperativeWorker:
                 raise Blocked("invalid lifetime lock")
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.state = self._read()
-            self.state.update(incarnation=uuid.uuid4().hex, closed=True)
-            _save(store / "barrier.json", self.state)
-            self.tickets = set()
+            self.failed = False
+            self._commit(incarnation=uuid.uuid4().hex, closed=True)
         except BaseException:
             os.close(self.fd)
             raise
@@ -72,32 +73,82 @@ class CooperativeWorker:
         if (
             not isinstance(body, dict)
             or type(body.get("version")) is not int
-            or body["version"] != 1
+            or body["version"] != 2
             or not isinstance(body.get("owner"), str)
             or not body["owner"].strip()
             or type(body.get("closed")) is not bool
             or type(body.get("stop_latched")) is not bool
+            or "incarnation" not in body
             or (
                 body.get("incarnation") is not None
-                and not isinstance(body["incarnation"], str)
+                and (
+                    not isinstance(body["incarnation"], str)
+                    or not body["incarnation"].strip()
+                )
             )
             or (body["stop_latched"] and not body["closed"])
+            or not isinstance(body.get("reservations"), dict)
         ):
-            raise Blocked("invalid barrier; no repair")
+            raise Blocked("invalid or legacy accounting; no repair")
+        for ticket, record in body["reservations"].items():
+            if (
+                not isinstance(ticket, str)
+                or not ticket.strip()
+                or not isinstance(record, dict)
+                or record.get("owner") != body["owner"]
+                or not isinstance(record.get("incarnation"), str)
+                or not record["incarnation"].strip()
+                or type(record.get("completed")) is not bool
+                or body["incarnation"] is None
+            ):
+                raise Blocked("invalid reservation accounting; no repair")
         return body
 
-    def snapshot(self, *, accepted=True, reason="", **extra):
+    def _commit(self, **changes):
+        # Never expose an in-memory transition before its durable write returns.
+        # A failed write may have replaced the file: poison this incarnation so
+        # a caller catching the exception cannot continue from stale memory.
+        state = {**self.state, **changes}
+        try:
+            _save(self.store / "barrier.json", state)
+        except BaseException:
+            self.failed = True
+            raise
+        self.state = state
+
+    @property
+    def tickets(self):
         return {
-            **self.state,
+            ticket
+            for ticket, record in self.state["reservations"].items()
+            if not record["completed"]
+        }
+
+    @property
+    def unresolved_prior_work(self):
+        return sum(
+            not record["completed"]
+            and record["incarnation"] != self.state["incarnation"]
+            for record in self.state["reservations"].values()
+        )
+
+    def snapshot(self, *, accepted=True, reason="", **extra):
+        if self.failed:
+            raise Blocked("storage outcome unknown; restart required")
+        return {
+            **deepcopy(self.state),
             "accepted": accepted,
             "reason": reason,
             "active_work": len(self.tickets),
+            "unresolved_prior_work": self.unresolved_prior_work,
             "respawn_fenced": False,
             "install_enabled": False,
             **extra,
         }
 
     def dispatch(self, request):
+        if self.failed:
+            raise Blocked("storage outcome unknown; restart required")
         if not isinstance(request, dict):
             return self.snapshot(accepted=False, reason="object required")
         if (
@@ -130,26 +181,45 @@ class CooperativeWorker:
     def _open(self):
         if self.state["stop_latched"]:
             return self.snapshot(accepted=False, reason="permanent stop latch")
-        self.state["closed"] = False
-        _save(self.store / "barrier.json", self.state)
+        if self.unresolved_prior_work:
+            return self.snapshot(accepted=False, reason="unresolved prior incarnation")
+        self._commit(closed=False)
         return self.snapshot()
 
     def _begin(self):
-        if self.state["closed"]:
+        if self.state["closed"] or self.unresolved_prior_work:
             return self.snapshot(accepted=False, reason="admission closed")
         ticket = uuid.uuid4().hex
-        self.tickets.add(ticket)
+        self._commit(
+            reservations={
+                **self.state["reservations"],
+                ticket: {
+                    "owner": self.state["owner"],
+                    "incarnation": self.state["incarnation"],
+                    "completed": False,
+                },
+            }
+        )
         return self.snapshot(ticket=ticket)
 
     def _finish(self, ticket):
         if not isinstance(ticket, str) or ticket not in self.tickets:
             return self.snapshot(accepted=False, reason="unknown reservation")
-        self.tickets.remove(ticket)
+        record = self.state["reservations"][ticket]
+        if record["incarnation"] != self.state["incarnation"]:
+            return self.snapshot(
+                accepted=False, reason="prior incarnation requires recovery"
+            )
+        self._commit(
+            reservations={
+                **self.state["reservations"],
+                ticket: {**record, "completed": True},
+            }
+        )
         return self.snapshot()
 
     def _stop(self):
-        self.state.update(closed=True, stop_latched=True)
-        _save(self.store / "barrier.json", self.state)
+        self._commit(closed=True, stop_latched=True)
         return self.snapshot()
 
     def close(self):
