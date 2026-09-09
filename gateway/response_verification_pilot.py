@@ -75,3 +75,144 @@ class IsolatedPilotAdapter(BasePlatformAdapter):
             finally:
                 self._sending = False
                 self.attempt.close()
+
+
+class OuterPilotLifecycle:
+    """Explicit local owner; replacing an attempt joins its complete outer task.
+
+    No runner registration or reconnect authority. Dispatch identities are consumed
+    for this owner only; durable/cross-instance replay is deliberately unsupported.
+    """
+
+    def __init__(self):
+        self.active = None
+        self.consumed = set()
+        self._lock = asyncio.Lock()
+
+    async def start(self, attempt, sink, event, raw, handler):
+        async with self._lock:
+            identity = (attempt.context.task_id, attempt.context.attempt_id)
+            if identity in self.consumed:
+                raise ValueError("dispatch identity already consumed")
+            if self.active is not None:
+                await self.active.stop()
+            self.consumed.add(identity)
+            adapter = _OuterPilotAdapter(self, attempt, sink, event, raw, handler)
+            self.active = adapter
+            adapter._start_session_processing(event, "isolated-outer")
+            adapter.outer_task = adapter._session_tasks["isolated-outer"]
+            return adapter
+
+    async def stop(self):
+        async with self._lock:
+            if self.active is not None:
+                await self.active.stop()
+
+
+class _OuterPilotAdapter(IsolatedPilotAdapter):
+    def __init__(self, owner, attempt, sink, event, raw, handler):
+        super().__init__(attempt, sink, event.source.chat_id)
+        self.owner = owner
+        self.selected_destination = (self, event.source.chat_id, sink)
+        self.raw = raw
+        self.handler = handler
+        self.outer_task = self.consumer_task = self.consumer = None
+        self.closed = False
+        self.draft_seen = asyncio.Event()
+        self._message_handler = self._handle_local
+
+    def current(self):
+        return self.owner.active is self and not self.closed
+
+    def _final_delivery_adapter(self, source):
+        adapter = super()._final_delivery_adapter(source)
+        selected_adapter, selected_chat, selected_sink = self.selected_destination
+        if (
+            not self.current()
+            or selected_adapter is not self
+            or selected_chat != self.chat_id
+            or selected_sink is not self.sink
+        ):
+            raise ValueError("obsolete pilot destination")
+        return adapter
+
+    def supports_draft_streaming(self, chat_type=None, metadata=None, chat_id=None):
+        return True
+
+    async def send_draft(self, chat_id, draft_id, content, metadata=None):
+        if self.current():
+            await super().send_draft(chat_id, draft_id, content, metadata)
+            self.draft_seen.set()
+        return SendResult(success=True)
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        if self._sending:
+            return await super().send(chat_id, content, reply_to, metadata)
+        # Consumer finals, cancellation edits and error notices remain local drafts.
+        await self.send_draft(chat_id, 1, content, metadata)
+        return SendResult(success=True)
+
+    async def _send_final_text(self, event, *args, **kwargs):
+        if self._sending:
+            return await super()._send_final_text(event, *args, **kwargs)
+        if self.current():
+            await self.deliver(event, self.raw)
+
+    async def _handle_local(self, event):
+        from gateway.platforms.base import EphemeralReply
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+        from response_verification.pilot import settle_owned
+
+        self.consumer = GatewayStreamConsumer(
+            self,
+            self.chat_id,
+            StreamConsumerConfig(
+                transport="draft", buffer_threshold=1, edit_interval=0
+            ),
+            run_still_current=self.current,
+        )
+        consumer = self.consumer
+        self.consumer_task = asyncio.create_task(consumer.run())
+        accepting = True
+
+        def delta(text):
+            if accepting and self.current():
+                consumer.on_delta(text)
+
+        try:
+            final = await self.handler(event, delta)
+            consumer.finish(final)
+            await self.consumer_task
+            return EphemeralReply(DENIED, ttl_seconds=0)
+        finally:
+            accepting = False
+            self.consumer_task.cancel()
+            await settle_owned(self.consumer_task)
+            consumer._wake_flush_waiters()
+            consumer._reset_message_state()
+            consumer._think_buffer = ""
+            consumer._delivered_commentary_texts.clear()
+            consumer._delivered_segment_texts.clear()
+
+    async def _process_message_background(self, event, session_key):
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            self.closed = True
+            if not self.attempt.terminal:
+                await self.attempt.cancel_and_join()
+            self.attempt.close()
+
+    async def stop(self):
+        from response_verification.pilot import settle_owned
+
+        self.closed = True
+        self._dispatched = True
+        self.attempt.cancel()
+        if self.outer_task is not None:
+            self.outer_task.cancel()
+            await settle_owned(self.outer_task)
+        await self.attempt.cancel_and_join()
+
+    async def disconnect(self):
+        await self.stop()

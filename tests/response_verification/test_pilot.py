@@ -437,3 +437,214 @@ async def test_disconnect_before_delivery_consumes_dispatch(tmp_path):
     await adapter.deliver(event, json.dumps(wire).encode(), SENTINEL)
     assert not adapter.sink and not adapter.attempt.drafts
     assert adapter.attempt.process_returncode is None
+
+
+@pytest.mark.asyncio
+async def test_real_outer_lifecycle_success_and_stale_callback(tmp_path):
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    base, event, wire, _ = fixture(tmp_path)
+    owner = OuterPilotLifecycle()
+    callbacks = []
+
+    async def handler(event, delta):
+        callbacks.append(delta)
+        delta(SENTINEL)
+        await owner.active.draft_seen.wait()
+        return SENTINEL
+
+    adapter = await owner.start(
+        base.attempt, base.sink, event, json.dumps(wire).encode(), handler
+    )
+    await asyncio.wait_for(adapter.outer_task, 4)
+    assert base.sink == [COMPLETE.encode()]
+    assert adapter.consumer_task.done()
+    assert adapter.attempt._active_task is None
+    assert adapter.attempt.process_returncode == 0
+    callbacks[0](SENTINEL)
+    await adapter._send_final_text(
+        event, "stale", SENTINEL, {}, True, 0, lambda _: None
+    )
+    assert adapter.consumer._queue.empty()
+    assert not adapter.consumer._accumulated and not adapter.attempt.drafts
+    assert base.sink == [COMPLETE.encode()]
+    with pytest.raises(ValueError, match="identity already consumed"):
+        await owner.start(base.attempt, [], event, json.dumps(wire).encode(), handler)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["stop", "replace", "reconnect"])
+async def test_outer_active_verifier_lifecycle(tmp_path, action):
+    import subprocess
+    from types import SimpleNamespace
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    ready = tmp_path / "outer-ready"
+    program = """
+import subprocess, sys, os, json, pathlib, time
+child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
+p = pathlib.Path(sys.argv[1]); stage = p.with_suffix('.tmp')
+stage.write_text(json.dumps([os.getpid(), child.pid])); stage.replace(p)
+time.sleep(60)
+"""
+    base, event, wire, _ = fixture(
+        tmp_path, command=[sys.executable, "-I", "-c", program, str(ready)], timeout=10
+    )
+    owner = OuterPilotLifecycle()
+    replacement_sink = []
+    callbacks = []
+
+    async def handler(event, delta):
+        callbacks.append(delta)
+        delta(SENTINEL)
+        await owner.active.draft_seen.wait()
+        return SENTINEL
+
+    adapter = await owner.start(
+        base.attempt, base.sink, event, json.dumps(wire).encode(), handler
+    )
+    try:
+        async with asyncio.timeout(4):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        pids = json.loads(ready.read_text())
+        if action == "replace":
+            other, event2, wire2, _ = fixture(tmp_path, "outer-second")
+            new = await owner.start(
+                other.attempt,
+                replacement_sink,
+                event2,
+                json.dumps(wire2).encode(),
+                handler,
+            )
+            await asyncio.wait_for(new.outer_task, 4)
+            assert replacement_sink == [COMPLETE.encode()]
+            assert new.consumer_task.done() and not new.attempt.drafts
+        elif action == "reconnect":
+
+            def resolve(_):
+                pytest.fail("unsupported resolver must never be invoked")
+
+            adapter.gateway_runner = SimpleNamespace(_adapter_for_source=resolve)
+            # Reject routing while the real outer task owns an active verifier.
+            with pytest.raises(ValueError, match="unsupported pilot owner"):
+                adapter._final_delivery_adapter(event.source)
+            await asyncio.gather(adapter.outer_task, return_exceptions=True)
+            assert not replacement_sink
+        else:
+            await owner.stop()
+        assert adapter.outer_task.done() and adapter.consumer_task.done()
+        assert adapter.attempt._active_task is None
+        assert adapter.attempt.process_returncode == -9
+        assert adapter.attempt.terminal and not adapter.attempt.drafts
+        callbacks[0](SENTINEL)
+        await adapter._send_final_text(
+            event, "stale", SENTINEL, {}, True, 0, lambda _: None
+        )
+        assert adapter.consumer._queue.empty() and not adapter.consumer._accumulated
+        assert not base.sink
+        assert SENTINEL.encode() not in b"".join(base.sink + replacement_sink)
+        async with asyncio.timeout(3):
+            while any(
+                subprocess.run(
+                    ["/bin/ps", "-p", str(pid), "-o", "pid="],
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                for pid in pids
+            ):
+                await asyncio.sleep(0.02)
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["stop", "reconnect", "sink-swap"])
+async def test_outer_streaming_stop_and_reconnect_refusal(tmp_path, action):
+    from types import SimpleNamespace
+    from gateway.response_verification_pilot import OuterPilotLifecycle
+
+    base, event, wire, _ = fixture(tmp_path)
+    owner = OuterPilotLifecycle()
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    replacement_sink = []
+    callbacks = []
+
+    async def handler(event, delta):
+        callbacks.append(delta)
+        delta(SENTINEL)
+        await owner.active.draft_seen.wait()
+        entered.set()
+        await release.wait()
+        return SENTINEL
+
+    adapter = await owner.start(
+        base.attempt, base.sink, event, json.dumps(wire).encode(), handler
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        if action == "stop":
+            await owner.stop()
+        else:
+            if action == "reconnect":
+
+                def resolve(_):
+                    pytest.fail("replacement transport is unsupported")
+
+                adapter.gateway_runner = SimpleNamespace(_adapter_for_source=resolve)
+            else:
+                adapter.sink = replacement_sink
+            release.set()
+            await asyncio.wait_for(adapter.outer_task, 3)
+        callbacks[0](SENTINEL)
+        await adapter._send_final_text(
+            event, "stale", SENTINEL, {}, True, 0, lambda _: None
+        )
+        assert not base.sink and not replacement_sink
+        assert adapter.attempt.process_returncode is None
+        assert adapter.consumer_task.done() and adapter.outer_task.done()
+        assert adapter.consumer._queue.empty() and not adapter.consumer._accumulated
+        assert adapter.attempt.terminal and not adapter.attempt.drafts
+        assert not adapter._active_sessions
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_outer_adapter_keeps_handler_final(tmp_path):
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import BasePlatformAdapter, EphemeralReply, SendResult
+
+    class OrdinaryLocalAdapter(BasePlatformAdapter):
+        def __init__(self):
+            super().__init__(
+                PlatformConfig(enabled=False, typing_indicator=False), Platform.LOCAL
+            )
+            self.sink = []
+
+        async def connect(self, *, is_reconnect=False):
+            return False
+
+        async def disconnect(self):
+            pass
+
+        async def get_chat_info(self, chat_id):
+            return {"type": "dm"}
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.sink.append(content)
+            return SendResult(success=True, message_id="ordinary")
+
+    adapter = OrdinaryLocalAdapter()
+
+    async def handler(event):
+        return EphemeralReply("Ordinary local handler final", ttl_seconds=0)
+
+    adapter._message_handler = handler
+    event = MessageEvent(text="local", source=SessionSource(Platform.LOCAL, "ordinary"))
+    adapter._start_session_processing(event, "ordinary-session")
+    task = adapter._session_tasks["ordinary-session"]
+    await task
+    assert adapter.sink == ["Ordinary local handler final"]
+    assert not adapter._active_sessions
