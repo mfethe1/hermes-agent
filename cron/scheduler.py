@@ -2112,6 +2112,7 @@ class _CronAgentSetup:
     reasoning_config: Any = None
     fallback_model: Any = None
     credential_pool: Any = None
+    strict_pin: Any = None
 
 
 def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _CronAgentSetup:
@@ -2137,6 +2138,16 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
         return setup
 
     setup.runtime, setup.model = _resolve_job_runtime(job, job_id, jc)
+    # buzz-79398 F: resolve the strict pin BEFORE the agent exists so both the
+    # runtime fallback guard and the audit line see the requested route.
+    try:
+        from agent.strict_pin import strict_pin_from_job
+        setup.strict_pin = strict_pin_from_job(job, _cfg if isinstance(_cfg, dict) else {})
+    except Exception:
+        logger.debug("strict-pin resolution failed; job runs unpinned", exc_info=True)
+        setup.strict_pin = None
+    if getattr(setup, "strict_pin", None) is not None:
+        logger.info("Job '%s' STRICT-PIN %s — fallback substitution disabled", job_id, setup.strict_pin.describe())
     setup.reasoning_config = _resolve_job_reasoning_config(
         job, _cfg if isinstance(_cfg, dict) else {}, str(setup.model)
     )
@@ -2164,6 +2175,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         reasoning_config=setup.reasoning_config,
         prefill_messages=setup.prefill_messages,
         fallback_model=setup.fallback_model,
+        strict_pin=setup.strict_pin,
         credential_pool=setup.credential_pool,
         providers_allowed=pr.get("only"),
         providers_ignored=pr.get("ignore"),
@@ -2187,10 +2199,33 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
 class _FireAudit:
     """One usage_audit.jsonl line per fire (created once the agent exists; fire id + start clock)."""
 
-    def __init__(self, job: dict, job_id: str, model: str):
+    def __init__(self, job: dict, job_id: str, model: str, strict_pin=None, agent=None):
         self.job, self.job_id, self.model = job, job_id, model
+        self.strict_pin = strict_pin
+        self.agent = agent
         self.fire_id = uuid.uuid4().hex
         self.t_start = time.monotonic()
+
+    def _route_evidence(self) -> dict:
+        """buzz-79398 F: requested AND actual model/provider per fire, plus the
+        pin verdict — persisted so substitution is visible and an independent
+        reviewer can reject mismatches."""
+        ev: dict = {"requested_model": self.model or None}
+        pin = self.strict_pin
+        if pin is not None:
+            ev["requested_provider"] = pin.provider
+            ev["strict_pin"] = pin.describe()
+        agent = self.agent
+        if agent is not None:
+            ev["actual_model"] = getattr(agent, "model", None) or None
+            ev["actual_provider"] = getattr(agent, "provider", None) or None
+            ev["route_substituted"] = bool(
+                getattr(agent, "_provider_fallback_active", False)
+                or getattr(agent, "_fallback_activated", False))
+            if pin is not None:
+                ev["pin_ok"] = pin.matches(
+                    getattr(agent, "provider", None), getattr(agent, "model", None))
+        return ev
 
     def write(self, result: dict, error: Optional[str]) -> None:
         _write_usage_audit({
@@ -2204,7 +2239,8 @@ class _FireAudit:
             "deliver_target": self.job.get("deliver"),
             "model": self.model or None,
             "duration_ms": int((time.monotonic() - self.t_start) * 1000),
-            "error": error})
+            "error": error,
+            **self._route_evidence()})
 
 
 
@@ -2264,7 +2300,7 @@ def run_job(
         agent = _construct_cron_agent(
             AIAgent, job, _cfg, setup, workdir=scope.workdir, session_id=_cron_session_id,
             session_db=_session_db)
-        _audit = _FireAudit(job, job_id, model)
+        _audit = _FireAudit(job, job_id, model, strict_pin=getattr(setup, "strict_pin", None), agent=agent)
 
         result = _run_agent_with_watchdog(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,

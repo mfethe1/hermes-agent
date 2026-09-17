@@ -1829,6 +1829,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
+    # buzz-79398 F: strict-pinned runs never substitute — refuse before any
+    # chain walk so the run fails on the pinned route (cooldown still armed).
+    try:
+        from agent.strict_pin import fallback_blocked_by_pin
+        if fallback_blocked_by_pin(agent, reason):
+            return False
+    except Exception:
+        logger.debug("strict-pin check failed; fallback proceeds", exc_info=True)
     from agent.fallback_cooldown import _arm_rate_limit_cooldown
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason)
     while True:
