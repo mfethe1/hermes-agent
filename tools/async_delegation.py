@@ -551,16 +551,87 @@ def _event_delivery(fn, evt: Dict[str, Any], claim_id: str) -> None:
         fn(str(evt.get("delegation_id") or ""), claim_id)
 
 
+def hold_completion_recovery(event: Dict[str, Any], claim_id: str, *, allow_notice: bool = False) -> bool:
+    """Atomically retain a boundary-closed result and owe a content-free origin notice.
+
+    Never wake an agent or replay side effects. Only a session_switch permits a notice;
+    resets/stops/unknown routes stay inspectable but unsent. Use dispatch ownership,
+    not a current-session source or a home-channel fallback. Existing delivery obligations
+    provide bounded retries and honest at-least-once transport semantics.
+    """
+    from gateway.run import _parse_session_key
+    from gateway import delivery_ledger
+    import hashlib
+    import re
+
+    delegation_id = str(event.get("delegation_id") or "")
+    now = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        # Reuse the ledger's existing DDL on this shared connection so the hold and
+        # notice commit together, including on fresh installations.
+        delivery_ledger._initialize_schema(conn)
+        row = conn.execute("""SELECT origin_session, parent_session_id, event_json, state
+            FROM async_delegations WHERE delegation_id=? AND delivery_state='pending'
+              AND delivery_claim=?""", (delegation_id, claim_id)).fetchone()
+        if row is None:
+            return False
+        origin, parent, saved_event, state = row
+        persisted = _json_object(saved_event)
+        route = _parse_session_key(origin or "") or {}
+        # Minimal initial lane: explicitly keyed Telegram DM/topic. Other platforms,
+        # scoped group keys and missing topic ids require independent origin review.
+        bound = (allow_notice and state in {"completed", "error", "failed"}
+                 and event.get("status") == state and persisted.get("status") == state
+                 and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(parent or ""))
+                 and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", delegation_id)
+                 and parent and event.get("parent_session_id") == parent
+                 and persisted.get("parent_session_id") == parent
+                 and event.get("session_key") == origin
+                 and persisted.get("session_key") == origin
+                 and route.get("platform") == "telegram" and not route.get("profile")
+                 and _db_path().resolve() == delivery_ledger._db_path().resolve()
+                 and route.get("chat_type") in {"dm", "thread"}
+                 and re.fullmatch(r"-?[0-9]+", str(route.get("chat_id") or ""))
+                 and (route.get("chat_type") != "thread" or str(route.get("thread_id") or "").isdigit()))
+        for field in ("platform", "chat_type", "chat_id", "thread_id"):
+            for evidence in (event, persisted):
+                if evidence.get(field) and str(evidence[field]) != str(route.get(field) or ""):
+                    bound = False
+        oid = "async-recovery:" + hashlib.sha256(f"async-recovery|{delegation_id}|{origin}".encode()).hexdigest()[:24]
+        if bound:
+            # No child-controlled goal/output/error text reaches the new foreground session.
+            content = ("A background result from an earlier session is saved for review. "
+                       f"Resume the original session {parent} and ask to inspect delegation {delegation_id}. "
+                       "No work was resumed or rerun; continuing requires your explicit approval.")
+            conn.execute("""INSERT OR IGNORE INTO delivery_obligations
+                (obligation_id, session_key, platform, chat_id, thread_id, content,
+                 state, attempts, created_at, updated_at, owner_pid, owner_started_at, adapter_profile)
+                VALUES (?, ?, 'telegram', ?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, ?)""",
+                (oid, origin, route["chat_id"], route.get("thread_id"), content, now, now,
+                 route.get("profile") or "default"))
+        recovery = {"parent_session_id": parent, "origin_session": origin,
+                    "notice_queued": bool(bound), "obligation_id": oid if bound else None,
+                    "action": "Inspect saved result in the original session; require explicit approval before continuing.",
+                    "hold_reason": "session_boundary" if bound else "origin_or_boundary_requires_review"}
+        persisted["recovery"] = recovery
+        conn.execute("""UPDATE async_delegations SET delivery_state='recovery_pending',
+            event_json=?, delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
+            WHERE delegation_id=? AND delivery_state='pending' AND delivery_claim=?""",
+            (json.dumps(persisted), now, delegation_id, claim_id))
+        return True
+
+
 def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
     with _DB_LOCK, _transaction() as conn:
         row = conn.execute("""SELECT origin_session, state, dispatched_at, completed_at,
                       result_json, delivery_state, delivery_attempts,
-                      origin_session_id
+                      origin_session_id, parent_session_id, event_json
                FROM async_delegations WHERE delegation_id=?""", (delegation_id,)).fetchone()
     return None if row is None else {
         "delegation_id": delegation_id, "origin_session": row[0], "state": row[1], "dispatched_at": row[2],
         "completed_at": row[3], "result": json.loads(row[4]) if row[4] else None, "delivery_state": row[5],
-        "delivery_attempts": row[6], "origin_session_id": row[7] or ""}
+        "delivery_attempts": row[6], "origin_session_id": row[7] or "", "parent_session_id": row[8],
+        "recovery": _json_object(row[9]).get("recovery")}
 
 
 _FAILED_TASK_STATES = frozenset({"error", "failed", "failure", "timeout", "stalled", "unknown", "interrupted"})

@@ -1522,12 +1522,26 @@ class GatewayNotificationsMixin:
         if verdict == "terminal":
             if evt_type == "async_delegation":
                 logger.warning(
-                    "Async delegation %s targets permanently-gone session %s; "
-                    "terminally dropping delivery (result remains in the delegation records).",
+                    "Async delegation %s targets closed session %s; holding for original-request review.",
                     claim.delegation_id or "<legacy>", parent_session_id,
                 )
                 if claim.claim_id:
-                    self._settle_durable_claim("drop", claim.delegation_id, claim.claim_id)
+                    try:
+                        from tools.async_delegation import hold_completion_recovery
+                        parent = await getattr(self, "_session_db").get_session(parent_session_id)
+                        allow_notice = bool(parent and parent.get("end_reason") == "session_switch")
+                        held = await asyncio.to_thread(
+                            hold_completion_recovery, evt, claim.claim_id, allow_notice=allow_notice)
+                        if held:
+                            # Existing obligation recovery sends only static text to the exact
+                            # dispatch origin; it never injects the result into a new agent session.
+                            await getattr(self, "_redeliver_pending_obligations")()
+                        else:
+                            self._settle_durable_claim("drop", claim.delegation_id, claim.claim_id)
+                    except Exception:
+                        logger.warning("Could not persist async recovery hold", exc_info=True)
+                        self._settle_durable_claim("defer", claim.delegation_id, claim.claim_id)
+                        claim.early_result = False
             else:
                 logger.warning(
                     "Background process %s completion targets "

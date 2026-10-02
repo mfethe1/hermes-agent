@@ -297,6 +297,11 @@ class GatewayStartupMixin:
         fails the response must not be sent, or the turn could be resumed too."""
         sendable = []
         for row in claimed:
+            if str(row.get("obligation_id") or "").startswith("async-recovery:"):
+                # A static old-request notice is not the current turn's answer. Never
+                # clear the replacement session's resume flag or inherit its authority.
+                sendable.append(row)
+                continue
             session_key = row.get("session_key") or ""
             if not session_key:
                 sendable.append(row)
