@@ -153,7 +153,7 @@ class DurableDispatchLedger:
                    for rec in self._read_all())
 
     def acquire(self):
-        fh = open(self.lock_path, "a+")
+        fh = open(self.lock_path, "a+", encoding="utf-8")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         return fh
     def release(self, fh) -> None:
