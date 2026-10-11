@@ -200,11 +200,12 @@ VALID_HOOKS: set[str] = {
     # block/rewrite adopters are discoverable once the middleware variant ships (#64231 taxonomy).
     "pre_command",
     "post_compaction",  # once per committed compaction on every path; observer (hooks.md, #118382)
+    "goal_blocked", "goal_recovery_selected",
 }
 
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
 # the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
-SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification"}
+SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification", "goal_blocked", "goal_recovery_selected"}
 
 _env_enabled = env_var_enabled  # imported by plugins/memory
 _UNSET = object()
