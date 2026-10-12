@@ -214,11 +214,15 @@ class GatewayGoalsMixin:
             logger.debug("goal continuation: no adapter for %s", getattr(source, "platform", None))
         return adapter
 
-    async def _send_goal_status_notice(self, source: Any, message: str) -> None:
+    async def _send_goal_status_notice(self, source: Any, message: str, *, menu=None, session_id=None) -> None:
         """Send a /goal judge status line back to the originating chat/thread."""
         adapter = self._goal_notice_adapter(source)
         if not adapter:
             return
+        if menu and session_id:
+            from gateway.goal_menu_presenter import send_menu
+            if await send_menu(self, source, session_id, menu):
+                return
         metadata = None
         with suppress(Exception):
             metadata = self._thread_metadata_for_source(source)
@@ -228,7 +232,7 @@ class GatewayGoalsMixin:
                 "goal continuation: status send failed: %s", getattr(result, "error", "unknown error"),
             )
 
-    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
+    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str, *, menu=None, session_id=None) -> None:
         """Send a /goal status line after the main response is delivered.
 
         The adapter sends the agent response after this caller returns, so for reading order use
@@ -240,7 +244,10 @@ class GatewayGoalsMixin:
 
         async def _deliver() -> None:
             try:
-                await self._send_goal_status_notice(source, message)
+                if menu:
+                    await self._send_goal_status_notice(source, message, menu=menu, session_id=session_id)
+                else:
+                    await self._send_goal_status_notice(source, message)
             except Exception as exc:
                 logger.warning("goal continuation: status send failed: %s", exc, exc_info=True)
 
@@ -306,7 +313,12 @@ class GatewayGoalsMixin:
         msg = decision.get("message") or ""
         # Deferred until the visible final response is delivered, else "✓ Goal achieved" precedes it.
         if msg and source is not None:
-            await self._defer_goal_status_notice_after_delivery(source, msg)
+            from gateway.goal_menu_presenter import status_menu
+            card = await status_menu(self, source, mgr, decision)
+            if card:
+                await self._defer_goal_status_notice_after_delivery(source, card.output, menu=card.menu, session_id=mgr.session_id)
+            else:
+                await self._defer_goal_status_notice_after_delivery(source, msg)
         prompt = decision.get("continuation_prompt") or ""
         if not decision.get("should_continue") or not prompt or source is None:
             return

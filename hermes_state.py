@@ -1646,6 +1646,13 @@ class SessionDB(
         else:
             self._write_sql(sql, (key, value))
 
+    def compare_and_set_meta(self, key: str, expected: str, value: str) -> bool:
+        """Atomically update an existing metadata value only when its snapshot still matches."""
+        def _do(conn):
+            return conn.execute("UPDATE state_meta SET value=? WHERE key=? AND value=?",
+                                (value, key, expected)).rowcount == 1
+        return bool(self._execute_write(_do))
+
     def retag_kanban_worker_sessions(self, workspaces_root: str) -> int:
         """Retag legacy kanban worker rows from ``cli`` to ``kanban`` by cwd under the board's workspaces
         root; gated once per root via state_meta. Returns rows retagged."""

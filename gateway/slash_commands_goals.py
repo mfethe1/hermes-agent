@@ -57,6 +57,10 @@ class GatewayGoalCommandsMixin:
             self._clear_goal_continuations(event, result.clear_pending)
         if result.prompt:
             self._enqueue_goal_turn(event, result.prompt, label="command enqueue", kickoff=result.kickoff)
+        if result.menu:
+            from gateway.goal_menu_presenter import send_menu
+            if await send_menu(self, event.source, mgr.session_id, result.menu):
+                return ""
         return result.output
 
     def _clear_goal_continuations(self, event: MessageEvent, verb: str) -> None:
@@ -69,7 +73,7 @@ class GatewayGoalCommandsMixin:
 
     def _enqueue_goal_turn(
         self, event: MessageEvent, text: str, *, label: str, kickoff: bool
-    ) -> None:
+    ) -> bool:
         """Enqueue *text* as the next turn through the adapter FIFO (the post-turn judge's path).
 
         A kickoff keeps the triggering message id / channel prompt; a resume continuation carries
@@ -84,10 +88,13 @@ class GatewayGoalCommandsMixin:
                     source=event.source,
                     message_id=event.message_id if kickoff else None,
                     channel_prompt=event.channel_prompt if kickoff else None,
+                    metadata={} if kickoff else {"goal_continuation": True},
                 )
                 self._enqueue_fifo(quick_key, turn, adapter)
+                return getattr(turn, "_gateway_accepted", False) is True
         except Exception as exc:
             logger.debug("goal %s failed: %s", label, exc)
+        return False
 
     async def _handle_heartbeat_command(self, event: MessageEvent) -> str:
         """Handle /heartbeat (mirror of the CLI handler): the session's one recurring re-entry

@@ -180,6 +180,8 @@ class GatewayBusySessionMixin:
     def _is_goal_continuation_event(event_or_text: Any) -> bool:
         """True for synthetic /goal continuation turns (so pause/clear can spare real /queue items)."""
         text = getattr(event_or_text, "text", event_or_text) or ""
+        if not isinstance(event_or_text, str) and (getattr(event_or_text, "metadata", None) or {}).get("goal_continuation") is True:
+            return True
         return str(text).startswith("[Continuing toward your standing goal]\nGoal:")
 
     def _clear_goal_pending_continuations(self, session_key: str, adapter: Any) -> int:
