@@ -188,6 +188,12 @@ After every turn, Hermes calls an auxiliary model with:
 
 The judge is deliberately conservative: it marks a goal `done` only when the response **explicitly** confirms the goal is complete, when the final deliverable is clearly produced. A goal the agent explains is **unachievable** (impossible, out of scope, needs user input) gets a `blocked` verdict instead — never `done`: the goal **pauses** with the judge's reason (`🚫 Goal judged unachievable — paused`), so you can re-scope it with `/goal <text>` or override with `/goal resume` rather than burning budget or having an impossible task waved through as complete.
 
+### Clickable unblock menu (Telegram)
+
+Send `/goal unblock` (or `/goal options`) in the goal's original chat/topic. Telegram displays a compact native menu with applicable recommended paths, **Retry approved work**, **Diagnose & retry**, **Keep paused/waiting**, and **View blocker details**. Newly paused/waiting goals receive the menu automatically after the main response. Legacy paused goals can reopen it without first resuming or running a model. Other platforms show exact command equivalents.
+
+Selections are bound to the original session, profile, goal/contract/gates/subgoals, turn/budget snapshot, message and topic. Only authorized goal controllers can select; old/replayed menus never select a newer menu. A restarted adapter expires old buttons safely: reopen with `/goal unblock`. Concurrent taps use an atomic metadata claim. Exhausted goals offer an explicit **+20 turns** action; other choices retain the current budget. No choice bypasses tool approvals or changes completion checks. Idle selections start a continuation through the session guard; busy sessions queue without interruption. Refused admission leaves the goal paused with a fresh menu rather than falsely claiming work started.
+
 ### Optional blocked-goal recovery
 
 A policy plugin can subscribe to `goal_blocked` to propose concrete alternatives instead of treating every blocker as impossible. Without a plugin, the existing blocked/pause behavior is unchanged. `/goal options` shows the saved choices, their risk, authority, effects, rollback and verification. An authorized operator selects one with `/goal choose <recovery-id> <option-id>` in the originating session. Choices expire after 24 hours, bind to the exact goal/contract/subgoals/gates and turn revision, and cannot replay.

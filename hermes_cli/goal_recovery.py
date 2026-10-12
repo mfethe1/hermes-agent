@@ -167,8 +167,8 @@ def handle_blocked(manager, response: str, reason: str):
     return None
 
 
-def choose_option(manager, token: str, option_id: str):
-    """Human selection is session/revision/expiry bound; never resets budget or changes requirements."""
+def prepare_choice(manager, token: str, option_id: str):
+    """Stage a validated selection in memory; caller commits before any notification or enqueue."""
     from hermes_cli.goal_command import GoalCommandResult
     state = manager._require_goal()
     assessment = state.recovery
@@ -185,16 +185,25 @@ def choose_option(manager, token: str, option_id: str):
     if option["route"] != "block" and state.turns_used >= state.max_turns:
         raise ValueError("turn budget exhausted; explicitly /goal resume before continuing")
     assessment["consumed"] = True
+    state.clear_wait()
     if option["route"] == "block":
-        manager.pause("user selected block")
-        _notify(manager, assessment, option, "human")
-        return GoalCommandResult("⏸ Goal remains blocked.", clear_pending="pause")
+        state.status = "paused"
+        state.paused_reason = "user selected block"
+        return GoalCommandResult("⏸ Goal remains blocked.", clear_pending="pause"), assessment, option
     state.status = "active"
     state.paused_reason = None
-    state.clear_wait()
+    if option["route"] == "wait":
+        state.waiting_since = time.time()
+        state.waiting_until = state.waiting_since + option["wait_seconds"]
+        state.waiting_reason = state.last_reason or "selected dependency wait"
+        result = GoalCommandResult(f"⏳ Selected {option_id}; parked for {option['wait_seconds']} seconds.")
+    else:
+        result = GoalCommandResult(f"▶ Selected {option_id}; existing permissions still apply.", prompt=_prompt(manager, option))
+    return result, assessment, option
+
+
+def choose_option(manager, token: str, option_id: str):
+    result, assessment, option = prepare_choice(manager, token, option_id)
     manager._save()
     _notify(manager, assessment, option, "human")
-    if option["route"] == "wait":
-        manager._apply_wait_directive({"seconds": option["wait_seconds"]}, state.last_reason or "selected dependency wait")
-        return GoalCommandResult(f"⏳ Selected {option_id}; parked for {option['wait_seconds']} seconds.")
-    return GoalCommandResult(f"▶ Selected {option_id}; existing permissions still apply.", prompt=_prompt(manager, option))
+    return result

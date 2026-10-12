@@ -21,6 +21,7 @@ class GoalCommandResult:
     kickoff: bool = False
     clear_pending: str | None = None
     error: bool = False
+    menu: dict | None = None
 
 
 def _english(key, default, **values):
@@ -36,8 +37,20 @@ def _show(mgr, arg, render):
 
 
 def _options(mgr, arg, render):
-    from hermes_cli.goal_recovery import render_options
-    return GoalCommandResult(render_options(mgr))
+    from hermes_cli.goal_unblock import open_menu
+    return open_menu(mgr)
+
+
+def _unblock(mgr, arg, authorize):
+    from hermes_cli.goal_unblock import open_menu, select_action
+    if not arg:
+        return open_menu(mgr)
+    tokens = arg.split()
+    if len(tokens) != 2:
+        return GoalCommandResult("Usage: /goal unblock [<menu-id> <action>]", error=True)
+    if denial := authorize():
+        return GoalCommandResult(denial, error=True)
+    return select_action(mgr, *tokens)
 
 
 def _choose(mgr, arg, authorize):
@@ -120,7 +133,7 @@ _EXACT_HANDLERS = {
 # clear/stop/done stay out — guessing wrong would end a goal the user meant to keep.
 _BARE_CONTROL_VERBS = frozenset({"resume", "continue", "unpause", "pause", "status", "show", "unwait"})
 # First words that make a command goal control (the gateway busy path dispatches these).
-_CONTROL_FIRST_WORDS = _BARE_CONTROL_VERBS | {"wait", "gate", "choose", "options"}
+_CONTROL_FIRST_WORDS = _BARE_CONTROL_VERBS | {"wait", "gate", "choose", "options", "unblock"}
 
 
 def _bare_control(mgr, verb, rest, render):
@@ -221,6 +234,9 @@ def dispatch_goal_command(
         if verb == "wait":
             prefix = "/goal wait"
             return _wait(mgr, rest)
+        if verb == "unblock":
+            prefix = "/goal unblock"
+            return _unblock(mgr, rest, authorize_gate)
         if verb == "choose":
             prefix = "/goal choose"
             return _choose(mgr, rest, authorize_gate)
