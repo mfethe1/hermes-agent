@@ -120,3 +120,25 @@ async def test_second_click_cannot_execute_twice(adapter):
     await adapter._handle_goal_recovery_callback(q, q.data, {})
     await adapter._handle_goal_recovery_callback(q, q.data, {})
     assert selected.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_menu_text_survives_real_markdown_v2_send_path(adapter):
+    """Regression (live 2026-10-12 09:56): the real _send_prompt defaults to MarkdownV2, so unescaped '.' in the
+    plain menu text made Telegram reject the card. Drive the REAL _send_prompt; only the bot transport is faked."""
+    import re as _re
+    from plugins.platforms.telegram.adapter import ParseMode
+    sent = {}
+
+    async def control(chat_id, text, *, parse_mode, reply_markup, thread_id, metadata, reply_to_mode):
+        sent.update(text=text, parse_mode=parse_mode)
+        return SimpleNamespace(message_id=41)
+    adapter._bot = object()
+    adapter._send_control_message = control
+    card = dict(menu(), text="Goal paused (wait 900s). Risk: low - see v1.2! [x] a_b *c* #1 +2 =3 |4| {5} ~6 `7` >8")
+    result = await adapter.send_goal_recovery_menu("123", card, AsyncMock(), metadata={"thread_id": "7"})
+    assert result.success, result
+    assert sent["parse_mode"] == ParseMode.MARKDOWN_V2
+    unescaped = _re.findall(r"(?<!\\)[_*\[\]()~`>#+\-=|{}.!]", sent["text"])
+    assert unescaped == [], unescaped
+    assert _re.sub(r"\\(.)", r"\1", sent["text"]) == card["text"]

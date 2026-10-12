@@ -13,7 +13,7 @@ class TelegramGoalRecoveryMixin:
         return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
     async def send_goal_recovery_menu(self, chat_id, menu, on_selected, metadata=None):
-        from .adapter import InlineKeyboardButton, InlineKeyboardMarkup
+        from .adapter import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, _escape_mdv2
         registry = getattr(self, "_goal_recovery_menus", None)
         if registry is None:
             registry = self._goal_recovery_menus = {}
@@ -34,9 +34,11 @@ class TelegramGoalRecoveryMixin:
             def remember(message):
                 registry[(str(chat_id), str(message.message_id), menu["id"])] = dict(
                     menu=menu, callback=on_selected, thread=thread, metadata=meta, busy=False)
-            return menu["text"], keyboard, remember
+            # Menu text is plain prose; _send_prompt treats parse_mode=None as MarkdownV2, so escape every
+            # reserved character or Telegram rejects the card ("character '.' is reserved").
+            return _escape_mdv2(str(menu["text"])), keyboard, remember
         return await self._send_prompt("send_goal_recovery_menu", chat_id, meta, build,
-                                       parse_mode=None, thread_id=thread, reply_to_mode=self._reply_to_mode)
+                                       parse_mode=ParseMode.MARKDOWN_V2, thread_id=thread, reply_to_mode=self._reply_to_mode)
 
     async def _handle_goal_recovery_callback(self, query, data, cb):
         if not await self._callback_authorized(query, cb, "You are not authorized to control this goal."):
