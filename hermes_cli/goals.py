@@ -452,6 +452,7 @@ class GoalState:
     # /goal gate add <cmd>: ALL must pass before the judge may declare done.
     gates: list[GoalGate] = field(default_factory=list)
     recovery: Optional[dict[str, Any]] = None
+    unblock_menu: Optional[dict[str, Any]] = None
     recovery_attempts: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
@@ -471,6 +472,7 @@ class GoalState:
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
             recovery=data.get("recovery") if isinstance(data.get("recovery"), dict) else None,
+            unblock_menu=data.get("unblock_menu") if isinstance(data.get("unblock_menu"), dict) else None,
             recovery_attempts=[str(x) for x in (data.get("recovery_attempts") or [])][:2],
             subgoals=[str(s).strip() for s in raw_subgoals if str(s).strip()] if isinstance(raw_subgoals, list) else [],
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
