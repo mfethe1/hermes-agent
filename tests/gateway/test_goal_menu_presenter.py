@@ -112,3 +112,33 @@ async def test_non_native_adapter_falls_back_without_sending_fake_buttons(setup)
     mgr, card, source, runner, _, _ = setup
     runner._delivery_adapter_for = lambda s: SimpleNamespace(send=AsyncMock())
     assert not await presenter.send_menu(runner, source, mgr.session_id, card.menu)
+
+
+@pytest.mark.asyncio
+async def test_approval_by_unauthorized_user_stays_denied_and_audit_records_why(setup, monkeypatch, caplog):
+    """Consent is not permission: a chat member tapping 'resume' must not execute, must not consume the
+    owner's menu, and the audit trail must name the actor and the reason."""
+    import logging
+    from gateway import goal_menu_presenter as presenter
+    monkeypatch.setattr(presenter, "_scope", lambda home: contextlib.nullcontext())
+    mgr, card, source, runner, adapter, enqueued = setup
+    dispatched = []
+    real = presenter.dispatch_goal_command
+    monkeypatch.setattr(presenter, "dispatch_goal_command", lambda *a, **k: dispatched.append(a) or real(*a, **k))
+    await presenter.send_menu(runner, source, mgr.session_id, card.menu)
+    callback = adapter.send_goal_recovery_menu.await_args.args[2]
+    member = SessionSource(platform=Platform.TELEGRAM, chat_id="123", chat_type="dm", user_id="99", thread_id="7")
+    with caplog.at_level(logging.INFO, logger="gateway.goal_menu_presenter"):
+        denied = await callback(member, card.menu["id"], "resume")
+    assert denied.error and "Not authorized" in denied.output
+    assert not dispatched and not enqueued
+    assert goals.GoalManager(mgr.session_id).state.status == "paused"
+    lines = [r.getMessage() for r in caplog.records if "goal_menu_tap" in r.getMessage()]
+    assert lines == [f"goal_menu_tap outcome=denied reason=not_admin user=99 chat=123 thread=7 "
+                     f"session={mgr.session_id} menu={card.menu['id']} action=resume"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="gateway.goal_menu_presenter"):
+        applied = await callback(source, card.menu["id"], "resume")
+    assert not applied.error and len(enqueued) == 1
+    assert goals.GoalManager(mgr.session_id).state.status == "active"
+    assert any("outcome=applied reason=ok user=11" in r.getMessage() for r in caplog.records)

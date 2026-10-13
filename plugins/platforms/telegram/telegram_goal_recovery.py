@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramGoalRecoveryMixin:
@@ -42,6 +45,10 @@ class TelegramGoalRecoveryMixin:
 
     async def _handle_goal_recovery_callback(self, query, data, cb):
         if not await self._callback_authorized(query, cb, "You are not authorized to control this goal."):
+            message = getattr(query, "message", None)
+            logger.info("goal_menu_tap outcome=denied reason=not_allowlisted user=%s chat=%s data=%s",
+                        getattr(getattr(query, "from_user", None), "id", None), getattr(message, "chat_id", None),
+                        str(getattr(query, "data", ""))[:64])
             return
         match = re.fullmatch(r"gu:([0-9a-f]{16}):([a-z][a-z0-9_-]{0,40})", str(data))
         if not match or not query.message:

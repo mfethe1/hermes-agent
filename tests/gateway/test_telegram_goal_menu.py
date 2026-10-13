@@ -81,6 +81,18 @@ async def test_unauthorized_click_leaves_owner_menu_intact(adapter):
 
 
 @pytest.mark.asyncio
+async def test_non_allowlisted_click_is_audited(adapter, caplog):
+    import logging
+    card = menu(); _, selected = await send(adapter, card)
+    adapter._callback_authorized.return_value = False
+    q = query(card, actor="66")
+    with caplog.at_level(logging.INFO, logger="plugins.platforms.telegram.telegram_goal_recovery"):
+        await adapter._handle_goal_recovery_callback(q, q.data, {})
+    selected.assert_not_awaited()
+    assert any("outcome=denied reason=not_allowlisted user=66 chat=123" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changes", [{"chat": "other"}, {"thread": "other"}, {"message": 99}, {"action": "not-offered"}])
 async def test_wrong_identity_or_action_is_not_applied(adapter, changes):
     card = menu(); _, selected = await send(adapter, card)
