@@ -58,14 +58,16 @@ async def test_click_goes_through_shared_authorized_command_and_enqueues_origina
 
 
 @pytest.mark.asyncio
-async def test_non_admin_click_and_new_session_cannot_resume(setup, monkeypatch):
+async def test_other_chat_click_and_new_session_cannot_resume(setup, monkeypatch):
     from gateway import goal_menu_presenter as presenter
     monkeypatch.setattr(presenter, "_scope", lambda home: contextlib.nullcontext())
     mgr, card, source, runner, adapter, enqueued = setup
     await presenter.send_menu(runner, source, mgr.session_id, card.menu)
     callback = adapter.send_goal_recovery_menu.await_args.args[2]
-    stranger = SessionSource(platform=Platform.TELEGRAM, chat_id="123", chat_type="dm", user_id="99", thread_id="7")
-    assert (await callback(stranger, card.menu["id"], "resume")).error
+    elsewhere = SessionSource(platform=Platform.TELEGRAM, chat_id="456", chat_type="dm", user_id="11", thread_id="7")
+    assert (await callback(elsewhere, card.menu["id"], "resume")).error
+    other_topic = SessionSource(platform=Platform.TELEGRAM, chat_id="123", chat_type="dm", user_id="11", thread_id="8")
+    assert (await callback(other_topic, card.menu["id"], "resume")).error
     other = goals.GoalManager("newer-session"); other.set("new goal"); other.pause()
     async def current(event): return other, None
     runner._get_goal_manager_for_event = current
@@ -115,30 +117,25 @@ async def test_non_native_adapter_falls_back_without_sending_fake_buttons(setup)
 
 
 @pytest.mark.asyncio
-async def test_approval_by_unauthorized_user_stays_denied_and_audit_records_why(setup, monkeypatch, caplog):
-    """Consent is not permission: a chat member tapping 'resume' must not execute, must not consume the
-    owner's menu, and the audit trail must name the actor and the reason."""
+async def test_button_tap_does_not_require_admin_and_audit_records_who(setup, monkeypatch, caplog):
+    """Buttons do not require admin (Michael, 2026-10-13). A tap from the menu's own chat/topic by a user the
+    adapter allowlisted is applied even when admin gating would deny it, and the audit line names the actor."""
     import logging
     from gateway import goal_menu_presenter as presenter
     monkeypatch.setattr(presenter, "_scope", lambda home: contextlib.nullcontext())
     mgr, card, source, runner, adapter, enqueued = setup
-    dispatched = []
-    real = presenter.dispatch_goal_command
-    monkeypatch.setattr(presenter, "dispatch_goal_command", lambda *a, **k: dispatched.append(a) or real(*a, **k))
+    runner._resume_caller_is_admin = lambda s: False  # nobody is an explicit admin (matches live config)
     await presenter.send_menu(runner, source, mgr.session_id, card.menu)
     callback = adapter.send_goal_recovery_menu.await_args.args[2]
     member = SessionSource(platform=Platform.TELEGRAM, chat_id="123", chat_type="dm", user_id="99", thread_id="7")
     with caplog.at_level(logging.INFO, logger="gateway.goal_menu_presenter"):
-        denied = await callback(member, card.menu["id"], "resume")
-    assert denied.error and "Not authorized" in denied.output
-    assert not dispatched and not enqueued
-    assert goals.GoalManager(mgr.session_id).state.status == "paused"
+        applied = await callback(member, card.menu["id"], "resume")
+    assert not applied.error and len(enqueued) == 1
+    assert goals.GoalManager(mgr.session_id).state.status == "active"
     lines = [r.getMessage() for r in caplog.records if "goal_menu_tap" in r.getMessage()]
-    assert lines == [f"goal_menu_tap outcome=denied reason=not_admin user=99 chat=123 thread=7 "
+    assert lines == [f"goal_menu_tap outcome=applied reason=ok user=99 chat=123 thread=7 "
                      f"session={mgr.session_id} menu={card.menu['id']} action=resume"]
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="gateway.goal_menu_presenter"):
-        applied = await callback(source, card.menu["id"], "resume")
-    assert not applied.error and len(enqueued) == 1
-    assert goals.GoalManager(mgr.session_id).state.status == "active"
-    assert any("outcome=applied reason=ok user=11" in r.getMessage() for r in caplog.records)
+        again = await callback(source, card.menu["id"], "resume")
+    assert again.error and len(enqueued) == 1  # menu is single-use: a second tap cannot execute twice

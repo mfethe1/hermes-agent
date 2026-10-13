@@ -65,9 +65,8 @@ async def send_menu(runner, source, session_id, menu) -> bool:
         tapped_source = replace_source(source, user_id=str(actor.user_id), user_name=actor.user_name, is_bot=actor.is_bot)
         event = MessageEvent(text=f"/goal unblock {token} {action}", message_type=MessageType.TEXT, source=tapped_source)
         with _scope(home):
-            if not runner._resume_caller_is_admin(tapped_source):
-                audit(actor, token, action, "denied", "not_admin")
-                return GoalCommandResult("Not authorized to unblock this goal.", error=True)
+            # Buttons deliberately do NOT require admin (Michael, 2026-10-13): the adapter's chat
+            # allowlist plus the origin chat/topic check above are the authority for a tap.
             mgr, _ = await runner._get_goal_manager_for_event(event)
             if mgr is None or mgr.session_id != session_id:
                 audit(actor, token, action, "denied", "stale_session")
