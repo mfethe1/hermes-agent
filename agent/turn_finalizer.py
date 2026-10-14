@@ -539,6 +539,13 @@ def finalize_turn(
         _pending_verification_response_previewed=_pending_verification_response_previewed,
         logger=logger,
     )
+    # Record the outcome BEFORE any hook fires: ``_interrupt_requested`` is already
+    # cleared by this point, but turn-finalize hooks (post_llm_call is gated on
+    # ``not interrupted``; per-turn on_session_end always fires) may inject prompts,
+    # and the CLI-side injection chokepoint must be able to refuse a prompt that
+    # would resurrect a turn the user stopped. Reset at the next turn's prep
+    # (agent/turn_context.py).
+    agent._last_turn_interrupted = bool(interrupted)
 
     # A non-interrupted turn that fell out of the loop after a tool result, with no
     # follow-up assistant text, is the Desktop/TUI "silent stop" (#55316, #54756): the

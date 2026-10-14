@@ -649,6 +649,9 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
         agent._replay_startup_warnings()
 
     agent.iteration_budget = IterationBudget(agent.max_iterations)
+    # New turn starting: the previous turn's interrupt outcome (recorded in
+    # turn_finalizer.finalize_turn for the plugin-injection chokepoint) is history.
+    agent._last_turn_interrupted = False
     # Wall-clock run budget: stamped only when configured (one wrap-up notice per run).
     agent._run_budget_started_at = (
         time.time() if getattr(agent, "run_budget_seconds", None) else None

@@ -18,6 +18,33 @@ def inject_plugin_message(
     cli = manager._cli_ref
     # An origin names a messaging chat; the local REPL is never that chat.
     if cli is not None and origin is None:
+        # A hook must not keep the agent running past the limits the user (or
+        # the budget) already imposed: once the current turn was interrupted or
+        # the iteration budget is exhausted, a plugin-submitted prompt would
+        # land in the interrupt/pending queues and be dispatched as a NEW turn
+        # with a fresh budget — self-perpetuating past the limit (the Claude
+        # Code v2.1.299 bug class). Refuse here, at the one chokepoint every
+        # CLI-bound plugin prompt passes through. A hook firing mid-turn with
+        # budget left, or between turns after a normal completion, is still
+        # accepted: only the exhausted/interrupted state is refused.
+        agent = getattr(cli, "agent", None)
+        if agent is not None:
+            # ``_interrupt_requested`` covers a mid-turn injection racing an
+            # interrupt; ``_last_turn_interrupted`` (set in finalize_turn before
+            # hooks fire, reset at the next turn's prep) covers turn-finalize
+            # hooks — the flag itself is already cleared by then.
+            if (getattr(agent, "_interrupt_requested", False)
+                    or getattr(agent, "_last_turn_interrupted", False)):
+                logger.info(
+                    "inject_message: refused for plugin %s — current turn was interrupted",
+                    ctx.plugin_id)
+                return False
+            budget = getattr(agent, "iteration_budget", None)
+            if budget is not None and budget.remaining <= 0:
+                logger.info(
+                    "inject_message: refused for plugin %s — iteration budget exhausted",
+                    ctx.plugin_id)
+                return False
         queue_ = cli._interrupt_queue if getattr(cli, "_agent_running", False) else cli._pending_input
         queue_.put(msg)
         return True
