@@ -203,11 +203,18 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     # SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
-        lines = soul_path.read_text(encoding="utf-8-sig").strip().splitlines()
-        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in lines):
-            check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
-        else:  # template comments only (no real content)
-            check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
+        try:
+            lines = soul_path.read_text(encoding="utf-8-sig").strip().splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            # Never rewrite a file we cannot decode: a lossy read persisted back over the
+            # real bytes is the wipe class (same rule as memory_tool_store._read_raw_checked).
+            check_warn(f"{_DHH}/SOUL.md exists but is not readable as UTF-8",
+                       f"left untouched ({type(exc).__name__}: {exc})")
+        else:
+            if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in lines):
+                check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
+            else:  # template comments only (no real content)
+                check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
     else:
         check_warn(f"{_DHH}/SOUL.md not found", "(create it to give Hermes a custom personality)")
         if should_fix:
@@ -225,8 +232,17 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     ensure_dir(f, should_fix, memories_dir, f"{_DHH}/memories/ directory exists", f"Created {_DHH}/memories/",
                f"{_DHH}/memories/ not found")
     for fname in [n for on, n in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")) if on and existed]:
-        if (memories_dir / fname).exists():
-            check_ok(f"{fname} exists ({len((memories_dir / fname).read_text(encoding='utf-8-sig').strip())} chars)")
+        fpath = memories_dir / fname
+        if fpath.exists():
+            try:
+                text = fpath.read_text(encoding='utf-8-sig')
+            except (OSError, UnicodeDecodeError) as exc:
+                # Undecodable bytes: surface as unreadable, never rewrite (doctor must not crash
+                # on user data and must not persist a lossy decode over the original bytes).
+                check_warn(f"{fname} exists but is not readable as UTF-8",
+                           f"left untouched ({type(exc).__name__}: {exc})")
+            else:
+                check_ok(f"{fname} exists ({len(text.strip())} chars)")
         else:
             check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
 
