@@ -12,6 +12,7 @@ whole-file overwrite of content this task never saw or that changed since.
 
 import fnmatch
 import os
+import re
 from pathlib import Path
 
 from agent.file_safety import get_nt_namespace_error
@@ -189,6 +190,58 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
     "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
+_HERMES_EXECUTABLE_REL = re.compile(
+    r"^(?:plugins|hooks)(?:/|$)"                    # <home>/plugins/, <home>/hooks/
+    r"|^skills/[^/]+/scripts(?:/|$)"                # <home>/skills/<name>/scripts/
+    r"|^profiles/[^/]+/(?:plugins|hooks)(?:/|$)"    # sibling profiles' plugin/hook dirs
+    r"|^profiles/[^/]+/skills/[^/]+/scripts(?:/|$)"
+)
+
+
+def _executable_runtime_root() -> str | None:
+    """Repo root of the running Hermes source tree; bundled ``<root>/plugins/`` auto-loads.
+
+    Indirected so tests can point it at a fixture tree."""
+    try:
+        return str(Path(__file__).resolve().parents[1])
+    except Exception:
+        return None
+
+
+def _executable_plugin_hook_reason(resolved: str) -> str | None:
+    """Reason when *resolved* (already realpath'd) lands in a directory Hermes
+    auto-loads or executes code from, else ``None``.
+
+    A write into a plugin ``__init__.py``, a gateway ``hooks/<name>/handler.py``, a
+    shell-hook script under ``hooks/``, a skill ``scripts/`` executable, or a
+    project-local ``.hermes/plugins/`` file is not a text edit: it becomes code that
+    runs on a later turn or session (persistence/escalation — cf. Claude Code
+    v2.1.299 plugin-dir sandbox fix), so it routes through the same always-ask gate
+    as AGENTS.md/SOUL.md. Callers realpath first, so symlinked parents and ``..``
+    segments cannot slip past; normcase folds case-insensitive filesystems.
+    """
+    real = os.path.normcase(resolved)
+    bases = [os.path.normcase(b) for b in _hermes_exempt_homes()]
+    root = _executable_runtime_root()
+    if root:
+        bases.append(os.path.normcase(root))
+    for base in bases:
+        rel = os.path.relpath(real, base)
+        if rel.startswith(".."):
+            continue
+        if _HERMES_EXECUTABLE_REL.match(rel.replace(os.sep, "/")):
+            return ("auto-loaded Hermes plugin/hook/skill-script code "
+                    "(a write here becomes code Hermes executes later)")
+    # Project-local plugins: any <dir>/.hermes/plugins/ (opt-in via
+    # HERMES_ENABLE_PROJECT_PLUGINS) — covered even outside the Hermes home tree.
+    parts = Path(real).parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".hermes" and parts[i + 1] == "plugins":
+            return ("project-local .hermes/plugins code "
+                    "(a write here becomes code Hermes executes later)")
+    return None
+
+
 
 def _protected_instruction_config() -> tuple[bool, list[str]]:
     """Return ``(enabled, extra_patterns)`` from ``security.protected_instruction_files`` /
@@ -228,6 +281,13 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
         resolved = os.path.realpath(str(_resolve_path_for_task(filepath, task_id)))
     except (OSError, ValueError, RuntimeError):
         resolved = os.path.realpath(normalized)
+
+    # Executable plugin/hook/skill-script dirs run BEFORE the Hermes-home exemption
+    # below: the exemption exists because the home has its own guards, but none of
+    # them covered auto-loaded code — a write here is persisted code execution.
+    executable_reason = _executable_plugin_hook_reason(resolved)
+    if executable_reason:
+        return executable_reason
 
     # ~/.hermes itself is governed by its own guards (config.yaml hard-block,
     # mirror guard, write_approval); this gate targets PROJECT-LOCAL files only.

@@ -31,6 +31,16 @@ _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
 _SHELL_RC_FILES = r'(?:~|\$home|\$\{home\})/\.' r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
 _CREDENTIAL_FILES = r'(?:~|\$home|\$\{home\})/\.' r'(?:netrc|pgpass|npmrc|pypirc)\b'
 _HOME_PREFIX = r'(?:~|\$home|\$\{home\})/'
+# Auto-loaded executable code under the Hermes home: plugins/, gateway/shell hooks/,
+# skills/*/scripts/, sibling profiles' equivalents, and project-local .hermes/plugins/.
+# A redirect/tee here is persisted code execution, the terminal-side twin of
+# file_tools_write_guards._executable_plugin_hook_reason (cf. Claude Code v2.1.299).
+_HERMES_EXECUTABLE_PATH = (
+    r'(?:~\/\.hermes/|(?:\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'(?:(?:plugins|hooks)(?:/|$)|skills/[^\s/]+/scripts(?:/|$)'
+    r'|profiles/[^\s/]+/(?:(?:plugins|hooks)(?:/|$)|skills/[^\s/]+/scripts(?:/|$)))'
+    r'|(?:^|/)\.hermes/plugins(?:/|$)'
+)
 _SECRET_FILE = (
     rf'(?:{_SSH_SENSITIVE_PATH}|{_HERMES_ENV_PATH}|{_CREDENTIAL_FILES}|{_PROJECT_ENV_PATH}(?![\w-])'
     rf'|{_HOME_PREFIX}\.(?:aws/credentials|git-credentials|config/gh/hosts\.yml|docker/config\.json|kube/config)\b'
@@ -353,6 +363,8 @@ DANGEROUS_PATTERNS = [
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
     (rf'\btee\b.*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via tee"),
     (rf'>>?\s*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via redirection"),
+    (rf'\btee\b.*["\']?{_HERMES_EXECUTABLE_PATH}', "write auto-loaded Hermes plugin/hook code via tee"),
+    (rf'>>?\s*["\']?{_HERMES_EXECUTABLE_PATH}', "write auto-loaded Hermes plugin/hook code via redirection"),
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
     # -execdir has the same semantics as -exec (runs in each match's directory).
     (r'\bfind\b.*-exec(?:dir)?\s+(/\S*/)?rm\b', "find -exec/-execdir rm"),

@@ -14,6 +14,13 @@ import threading
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
+    # Lexical forms too: the runtime's generation dir is a symlink
+    # (cpython-3.11 -> cpython-3.11.15) and the interpreter reports stdlib paths
+    # through the UNRESOLVED spelling. The repo-root prefix below only saves the
+    # default layout (checkout inside the home); from a git worktree outside the
+    # home the lexical prefix is the only thing that matches.
+    Path(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
+} | {
     # A PM-activated developer shell runs sys.prefix's python against a dependency generation
     # whose site-packages sits under the (real) Hermes home; third-party imports from it are the
     # interpreter's installation, not Hermes state.
