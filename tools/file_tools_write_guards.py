@@ -198,16 +198,6 @@ _HERMES_EXECUTABLE_REL = re.compile(
 )
 
 
-def _executable_runtime_root() -> str | None:
-    """Repo root of the running Hermes source tree; bundled ``<root>/plugins/`` auto-loads.
-
-    Indirected so tests can point it at a fixture tree."""
-    try:
-        return str(Path(__file__).resolve().parents[1])
-    except Exception:
-        return None
-
-
 def _executable_plugin_hook_reason(resolved: str) -> str | None:
     """Reason when *resolved* (already realpath'd) lands in a directory Hermes
     auto-loads or executes code from, else ``None``.
@@ -221,10 +211,11 @@ def _executable_plugin_hook_reason(resolved: str) -> str | None:
     segments cannot slip past; normcase folds case-insensitive filesystems.
     """
     real = os.path.normcase(resolved)
+    # Deliberately scoped to the Hermes HOME (installed plugins, hooks, skill
+    # scripts), not the hermes-agent source repo's bundled ``plugins/``: that tree is
+    # ordinary source under git review, and gating it would force approval prompts
+    # (or hard refusals in unattended runs) for routine adapter development.
     bases = [os.path.normcase(b) for b in _hermes_exempt_homes()]
-    root = _executable_runtime_root()
-    if root:
-        bases.append(os.path.normcase(root))
     for base in bases:
         rel = os.path.relpath(real, base)
         if rel.startswith(".."):

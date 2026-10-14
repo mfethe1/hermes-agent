@@ -88,16 +88,27 @@ def test_write_project_local_plugin_refused(tmp_path):
     assert not target.exists()
 
 
-def test_write_bundled_repo_plugin_refused(tmp_path, monkeypatch):
-    """<hermes-agent repo>/plugins/<name>/ is auto-loaded bundled code."""
-    import tools.file_tools_write_guards as guards
-
+def test_write_source_repo_bundled_plugin_allowed(tmp_path):
+    """The hermes-agent SOURCE repo's plugins/ is ordinary git-reviewed source, not an
+    installed plugin dir: routine adapter edits there must not hit the always-ask gate."""
     fake_repo = tmp_path / "hermes-agent"
-    monkeypatch.setattr(guards, "_executable_runtime_root", lambda: fake_repo)
-    target = fake_repo / "plugins" / "evil" / "__init__.py"
+    target = fake_repo / "plugins" / "platforms" / "telegram" / "adapter.py"
     res = _write(target)
-    assert "error" in res, f"bundled repo plugin write was NOT gated: {res}"
-    assert not target.exists()
+    assert "error" not in res, f"source-repo plugin edit was wrongly gated: {res}"
+    assert target.exists()
+
+
+def test_write_source_repo_checked_out_inside_home_allowed(hermes_home):
+    """Production layout: the source checkout lives at <home>/hermes-agent/. Its
+    plugins/ must stay editable while <home>/plugins/ stays gated."""
+    target = hermes_home / "hermes-agent" / "plugins" / "platforms" / "telegram" / "adapter.py"
+    res = _write(target)
+    assert "error" not in res, f"in-home source checkout edit was wrongly gated: {res}"
+    assert target.exists()
+    installed = hermes_home / "plugins" / "evil" / "__init__.py"
+    res = _write(installed)
+    assert "error" in res, f"installed plugin write was NOT gated: {res}"
+    assert not installed.exists()
 
 
 # ── bypass variants: symlink, .. traversal, case ──────────────────────────
