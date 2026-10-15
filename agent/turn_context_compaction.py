@@ -141,19 +141,52 @@ def run_turn_start_compaction(
     return out
 
 
+def _idle_gap_anchor(messages: list[Any], current_turn_user_idx: Any, now: float) -> Optional[float]:
+    """Latest valid epoch-second ``timestamp`` among the persisted history messages, else None.
+
+    The messaging gateway resets ``agent._last_activity_ts`` at every cached-agent turn start
+    (and a cache-evicted agent re-initializes it to now), so an idle gap measured from that
+    attribute is ~0 and ``idle_compact_after_seconds`` never fires there. Restored transcript
+    rows carry their durable ``timestamp`` (hermes_state_messages._rows_to_conversation), which
+    survives those resets. The current turn's user message — already appended and stamped ~now
+    when this runs — is excluded via ``current_turn_user_idx``; non-numeric, non-positive,
+    millisecond-scale (>1e12) and future (>now+60s) values are ignored.
+    """
+    history = messages
+    if isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx <= len(messages):
+        history = messages[:current_turn_user_idx]
+    anchor: Optional[float] = None
+    for msg in history:
+        ts = msg.get("timestamp") if isinstance(msg, dict) else None
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            continue
+        if ts <= 0 or ts > 1e12 or ts > now + 60:
+            continue
+        if anchor is None or ts > anchor:
+            anchor = float(ts)
+    return anchor
+
+
 def _idle_compaction(
     agent: Any, out: CompactionOutcome, system_message: Optional[str], user_message: Any,
     effective_task_id: str,
 ) -> None:
     """Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``): fires on the
-    wall-clock gap since ``_last_activity_ts``; a cheap gap check gates the estimate."""
+    wall-clock gap since the last persisted history message (falling back to
+    ``_last_activity_ts`` when history carries no usable timestamps); a cheap gap check
+    gates the estimate."""
     from agent import turn_context as _tc
 
     messages = out.messages
     _idle_after = getattr(agent, "compression_idle_compact_after_seconds", 0)
     if not (agent.compression_enabled and _idle_after > 0 and messages):
         return
-    _idle_gap = time.time() - getattr(agent, "_last_activity_ts", time.time())
+    _now = time.time()
+    _history_anchor = _idle_gap_anchor(messages, out.current_turn_user_idx, _now)
+    _idle_gap = _now - (
+        _history_anchor if _history_anchor is not None
+        else getattr(agent, "_last_activity_ts", _now)
+    )
     if _idle_gap < _idle_after:
         return
     _compressor = agent.context_compressor
