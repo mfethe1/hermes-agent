@@ -150,7 +150,7 @@ def _idle_gap_anchor(messages: list[Any], current_turn_user_idx: Any, now: float
     rows carry their durable ``timestamp`` (hermes_state_messages._rows_to_conversation), which
     survives those resets. The current turn's user message — already appended and stamped ~now
     when this runs — is excluded via ``current_turn_user_idx``; non-numeric, non-positive,
-    millisecond-scale (>1e12) and future (>now+60s) values are ignored.
+    future (>now+60s, which includes millisecond-scale) values are ignored.
     """
     history = messages
     if isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx <= len(messages):
@@ -160,7 +160,7 @@ def _idle_gap_anchor(messages: list[Any], current_turn_user_idx: Any, now: float
         ts = msg.get("timestamp") if isinstance(msg, dict) else None
         if isinstance(ts, bool) or not isinstance(ts, (int, float)):
             continue
-        if ts <= 0 or ts > 1e12 or ts > now + 60:
+        if ts <= 0 or ts > now + 60:  # also rejects ms-scale values (~1e12)
             continue
         if anchor is None or ts > anchor:
             anchor = float(ts)
