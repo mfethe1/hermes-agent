@@ -80,3 +80,15 @@ def test_killing_an_exited_unreaped_engine_never_raises():
     os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped
     _kill_process_group_posix(proc)
     assert proc.wait() == 0
+
+
+def test_native_lane_records_the_group_before_it_kills(ops_for, monkeypatch):
+    """The native rg lane must record the pgid at spawn, or the kill above has nothing to fall back on."""
+    if os.environ["HERMES_NATIVE_FILE_READ"] != "1":
+        pytest.skip("only the native lane spawns rg itself")
+    import tools.environments.local as local
+    seen, real_kill = [], local._kill_process_group_posix
+    monkeypatch.setattr(local, "_kill_process_group_posix",
+                        lambda proc: (seen.append(getattr(proc, "_hermes_pgid", None)), real_kill(proc)))
+    r = _search(*ops_for('yes "{root}/a.txt:1:needle"'))  # never exits: the fetch bound forces the kill
+    assert r.total_count and seen and all(seen), (r, seen)
