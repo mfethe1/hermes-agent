@@ -92,12 +92,19 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> _ThreadRoutingStream:
     with _install_lock:
         proxy = _installed.get(attr)
         current = getattr(sys, attr, None)
-        if isinstance(current, _ThreadRoutingStream):
+        # Agent bootstrap may put its transparent safety writer around our
+        # router. Reuse the router underneath, keeping the writer installed;
+        # otherwise each background worker adds another pair of wrappers.
+        from agent.process_bootstrap import _SafeWriter
+        routed = current
+        while isinstance(routed, _SafeWriter):
+            routed = routed._inner
+        if isinstance(routed, _ThreadRoutingStream):
             # A redirect context may restore an older proxy; adopt it rather
             # than wrapping it into an unbounded chain.
-            _installed[attr] = current
-            _routing_states[attr] = current._state
-            return current
+            _installed[attr] = routed
+            _routing_states[attr] = routed._state
+            return routed
         if proxy is not None and current is proxy:
             return proxy
         # Route non-silenced threads to whatever is currently bound (an active
