@@ -887,6 +887,18 @@ def _leader_is_ours(pgid, expected_start) -> bool:
         return True
 
 
+def _record_process_group(proc) -> None:
+    """Record a setsid child's pgid and leader start-time fingerprint at spawn.
+    _kill_process_group_posix needs both once the leader has exited: macOS answers
+    getpgid() on an unreaped leader with ESRCH, and the fingerprint guards against
+    PID/PGID recycling before the group is signalled (#43044). The psutil fallback
+    in get_process_start_time captures a baseline on every platform, macOS included."""
+    with contextlib.suppress(ProcessLookupError):
+        proc._hermes_pgid = os.getpgid(proc.pid)
+        from gateway.status import get_process_start_time
+        proc._hermes_pgid_start = get_process_start_time(proc.pid)
+
+
 def _kill_process_group_posix(proc) -> None:
     """TERM the group, wait, KILL, then sweep setsid escapees. Descendants are
     snapshotted BEFORE the first signal — once the wrapper dies they reparent to
@@ -1073,14 +1085,7 @@ class LocalEnvironment(BaseEnvironment):
             start_new_session=True, cwd=self.cwd,
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
         if not _IS_WINDOWS:
-            with contextlib.suppress(ProcessLookupError):
-                proc._hermes_pgid = os.getpgid(proc.pid)
-                # Record the group leader's start-time fingerprint so _kill_process can
-                # detect PID/PGID recycling before signalling the group (#43044). The
-                # psutil fallback in get_process_start_time captures a baseline on every
-                # platform, macOS included.
-                from gateway.status import get_process_start_time
-                proc._hermes_pgid_start = get_process_start_time(proc.pid)
+            _record_process_group(proc)
         if stdin_data is not None:
             _pipe_stdin(proc, stdin_data)
         return proc
