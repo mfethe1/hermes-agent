@@ -10,6 +10,7 @@ to standalone exactly as before and queues nothing.
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -74,4 +75,18 @@ def test_other_live_failures_still_fall_to_standalone_and_queue_nothing(monkeypa
     standalone_calls, errors = _deliver_through_router(monkeypatch, gateway_loop, live_error="chat not found")
     assert standalone_calls == ["the report"]
     assert any("BotFather" in e for e in errors) and not any("queued" in e for e in errors)
+    assert dl.sweep_failed_for_runtime("telegram", profile="satellite") == []
+
+
+@pytest.mark.parametrize("live_error", ["flood_control:9000.0", "Flood control exceeded. Retry in 9000 seconds"])
+def test_rate_limit_queues_reply_without_standalone_bypass(monkeypatch, gateway_loop, live_error):
+    before = time.time()
+    standalone_calls, errors = _deliver_through_router(monkeypatch, gateway_loop, live_error=live_error)
+
+    assert standalone_calls == []
+    assert any("queued text" in error for error in errors)
+    retries = dl.pending_retries()
+    assert len(retries) == 1
+    assert retries[0]["platform"] == "telegram" and retries[0]["profile"] == "satellite"
+    assert retries[0]["not_before"] >= before + 9000
     assert dl.sweep_failed_for_runtime("telegram", profile="satellite") == []

@@ -1671,14 +1671,8 @@ def _deliver_via_live_adapter(
                 unverified_targets=unverified_targets,
             )
 
-        # Media rides the same DM-topic-aware routing as text. Skipped after a confirmation
-        # timeout (loop contended, text already assumed delivered) — record the drop instead.
-        # Send extracted media files as native attachments via the live adapter, using the same
-        # DM-topic-aware routing as the text send (#22773 — media previously used a bare thread_id and
-        # landed in the General lane for private DM topics). Skip on an in-flight confirmation timeout: the
-        # gateway loop is contended, so each media send would also block its 30s budget, and the text
-        # payload is already assumed delivered (#38922). Record the skipped attachments so the drop is
-        # visible rather than silently lost.
+        # Media shares text's DM-topic routing (#22773). After an in-flight confirmation timeout,
+        # avoid another blocking send and explicitly report skipped attachments (#38922).
         if adapter_ok and not timed_out and media_files:
             _live_send_media(t, media_metadata, media_files, delivery_errors)
         elif timed_out and media_files:
@@ -1689,11 +1683,8 @@ def _deliver_via_live_adapter(
                 delivery_errors)
 
         if adapter_ok:
-            # Log WHERE it went: a ghost delivery in the wrong lane is otherwise indistinguishable.
+            # Log the routing identity: delivery in General instead of the requested topic is a ghost (#77763).
             logger.info(
-                # Log WHERE it went, not just that it went: a ghost delivery that landed in the wrong lane
-                # (General topic instead of the routed thread) is indistinguishable from a real one without
-                # the routing identity (#77763).
                 "Job '%s': delivered to %s:%s via live adapter thread=%s message_id=%s",
                 job["id"], t.platform_name, t.chat_id,
                 route_thread_id if route_thread_id is not None else "-",
@@ -1776,15 +1767,16 @@ def _standalone_send(
 
 
 def _queue_for_live_reconnect(t: _TargetDelivery, content: str, media_files: list, delivery_errors: list) -> None:
-    """Hand a payload the live lane rejected as reconnect-only (``send_path_degraded``) and the
-    standalone lane then failed to send to the delivery ledger, as a failed reconnect-only row
-    owned by the adapter that rejected it: the post-reconnect sweep redelivers it (#125363). Only
-    reached after standalone failed, so nothing was sent and a replay cannot duplicate. The ledger
-    carries text only; dropped attachments are reported."""
+    """Queue a definitely unsent payload for reconnect or flood-deadline redelivery.
+
+    Reconnect-only rows reach here after standalone fails; flood refusals skip standalone so it
+    cannot bypass the live adapter's cooldown. The owning adapter's ledger preserves the text;
+    attachments that cannot be queued are reported.
+    """
     try:
         from gateway.delivery_ledger import (
-            compute_obligation_id, is_reconnect_only, ledger_enabled, mark_failed, record_obligation)
-        if not is_reconnect_only(t.live_error) or not ledger_enabled():
+            compute_obligation_id, is_flood_error, is_reconnect_only, ledger_enabled, mark_failed, record_obligation)
+        if not (is_reconnect_only(t.live_error) or is_flood_error(t.live_error)) or not ledger_enabled():
             return
         session_key = f"cron:{t.platform_name}:{t.chat_id}" + (f":{t.thread_id}" if t.thread_id else "")
         obligation_id = compute_obligation_id(session_key, f"job:{t.job.get('id', '?')}", content)
@@ -1797,7 +1789,8 @@ def _queue_for_live_reconnect(t: _TargetDelivery, content: str, media_files: lis
         logger.warning("Job '%s': could not queue %s for post-reconnect redelivery",
                        t.job.get("id"), t.where, exc_info=True)
         return
-    note = f"queued text for {t.where} for redelivery once the live adapter reconnects"
+    recovery = "the flood cooldown expires" if is_flood_error(t.live_error) else "the live adapter reconnects"
+    note = f"queued text for {t.where} for redelivery once {recovery}"
     if media_files:
         note += f" ({len(media_files)} attachment(s) not queued)"
     logger.warning("Job '%s': %s", t.job.get("id"), note)
@@ -1808,7 +1801,13 @@ def _deliver_standalone(
     t: _TargetDelivery, content: str, media_files: list, target_errors: list, delivery_errors: list,
 ) -> None:
     """Standalone fallback for a target the live lane did not deliver."""
+    from gateway.delivery_ledger import is_flood_error
+
     job = t.job
+    if is_flood_error(t.live_error):
+        delivery_errors.extend(target_errors)
+        _queue_for_live_reconnect(t, content, media_files, delivery_errors)
+        return
     if t.is_relay:
         # Relay owns the destination and credential; a native retry could duplicate — fail closed.
         if not target_errors:

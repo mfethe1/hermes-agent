@@ -63,6 +63,7 @@ def _success(platform: str, chat_id, warnings=None, **fields) -> dict:
 
 _NO_DELIVERABLE = "No deliverable text or media remained after processing MEDIA tags"
 
+_TELEGRAM_INLINE_RETRY_WAIT_SECONDS = 5.0
 _TELEGRAM_TRANSIENT_MARKERS = ("bad gateway", "502", "too many requests", "429", "service unavailable", "503",
                                "gateway timeout", "504")
 
@@ -89,7 +90,7 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
             return await bot.send_message(**kwargs)
         except Exception as exc:
             delay = _telegram_retry_delay(exc, attempt)
-            if delay is None or attempt >= attempts - 1:
+            if delay is None or delay > _TELEGRAM_INLINE_RETRY_WAIT_SECONDS or attempt >= attempts - 1:
                 raise
             logger.warning("Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
                            attempt + 1, attempts, delay, _sanitize_error_text(exc))

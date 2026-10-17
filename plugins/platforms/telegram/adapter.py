@@ -1510,6 +1510,8 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
                 _m = re.search(r"retry\s+(?:in\s+)?(\d+)", str(exc).lower(), re.IGNORECASE)
                 if _m:
                     _retry_after = float(_m.group(1))
+            if _retry_after is not None:
+                return self._record_send_flood_cooldown(chat_id, float(_retry_after))
             return self._rich_transient_result(exc, "sendRichMessage", retry_after=_retry_after)
         if isinstance(msg, dict):
             message_id = msg.get("message_id")
@@ -1555,6 +1557,9 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
                 return SendResult(success=True, message_id=message_id)
             if self._rich_rejected(exc, "rich editMessageText", "MarkdownV2 edit"):
                 return None
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
+                return self._record_send_flood_cooldown(chat_id, float(retry_after))
             return self._rich_transient_result(exc, "rich editMessageText")
         # Mirror the fresh-send index: a streamed final finalized via edit is otherwise never recorded.
         await self._record_rich_sent(chat_id, message_id, content)
@@ -2488,9 +2493,12 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
 
     async def _create_dm_topic(
         self, chat_id: int, name: str, icon_color: Optional[int] = None, icon_custom_emoji_id: Optional[str] = None) -> Optional[int]:
-        """Create a forum topic in a private (DM) chat (Bot API 9.4+); message_thread_id or None."""
+        """Create a private-chat topic, preserving rate-limit refusals for queued redelivery."""
         if not self._bot:
             return None
+        cooldown = self._send_flood_cooldown_remaining(chat_id)
+        if cooldown is not None:
+            raise RuntimeError(_flood_cap_result(cooldown).error)
         try:
             kwargs: dict[str, Any] = {"chat_id": chat_id, "name": name}
             if icon_color is not None:
@@ -2502,6 +2510,10 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
             logger.info("[%s] Created DM topic '%s' in chat %s -> thread_id=%s", self.name, name, chat_id, thread_id)
             return thread_id
         except Exception as e:
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after is not None:
+                result = self._record_send_flood_cooldown(chat_id, float(retry_after))
+                raise RuntimeError(result.error) from e
             error_text = str(e).lower()
             # Telegram has no "list topics" API: an existing topic is mapped from incoming messages.
             if "topic_name_duplicate" in error_text or "already" in error_text:
@@ -3813,6 +3825,8 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
         except Exception as fmt_err:
             if "not modified" in str(fmt_err).lower():
                 return True
+            if getattr(fmt_err, "retry_after", None) is not None or "retry after" in str(fmt_err).lower():
+                raise
             logger.warning(warn_fmt, self.name, _redact_telegram_error_text(fmt_err))
             await self._edit_text(chat_id, message_id, plain)
         return False
@@ -3820,21 +3834,15 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False, metadata: Optional[dict[str, Any]] = None,
    ) -> SendResult:
-        """Edit a previously sent Telegram message.
-
-        Telegram caps a message at 4096 UTF-16 codeunits. Streaming replies that outgrow it must NOT be truncated
-        silently nor fail (the consumer would re-send a duplicate): edit with the first chunk, send the rest as
-        continuations, and return the final chunk's id as the next edit target."""
+        """Edit a Telegram message; finalize oversized replies as ordered continuation chunks
+        without truncating or duplicating their already-visible prefix."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        # Shared per-chat budget (#116312): an interim (preview) edit is SKIPPED when the slot is busy —
-        # the text it would show is shown by the next edit anyway, so a burst of edits can't trip flood
-        # control. A final edit is never gated (the completed answer is always delivered). Sends wait for
-        # their slot; edits defer instead. Over-cap interim edits are exempt: the saturated-preview dedup
-        # below already throttles them to one real edit per ~4096-char growth. Consumed only when the
-        # edit actually fires. The skip is flagged in raw_response so the stream consumer does not
-        # record never-shown text as the visible prefix (a later flood fallback would then drop the
-        # tail the user never saw).
+        cooldown = self._send_flood_cooldown_remaining(chat_id)
+        if cooldown is not None:
+            return _flood_cap_result(cooldown)
+        # Shared pacing (#116312): skip busy interim edits, not finals; over-cap previews deduplicate below.
+        # Flag skipped text as unseen so a later flood fallback still delivers the missing tail.
         if (
             not finalize
             and utf16_len(content) <= self.MAX_MESSAGE_LENGTH
@@ -3845,26 +3853,14 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
                 self.name, chat_id)
             return SendResult(success=True, message_id=message_id, raw_response={"skipped": True})
         self._hold_chat_outbound_slot(chat_id)
-        # Rich finalize (Bot API 10.1): edit the preview IN PLACE via rich_message — no fresh send + delete.
-        # Before the 4,096 pre-flight because the rich cap is 32,768; falls back to legacy on rejection.
-        # Rich finalize (Bot API 10.1): when the completed content has constructs the legacy MarkdownV2 edit
-        # degrades (tables → bullet lists, task lists, <details>, block math) and rich is available, edit
-        # the preview IN PLACE via editMessageText's rich_message param. No fresh send + delete → no
-        # duplicate preview (the problem #46206 reverted the fresh-final path for). Attempted before the
-        # 4,096 overflow pre-flight because the rich text cap is 32,768 — a rich table that exceeds the
-        # MarkdownV2 limit must not be split into legacy chunks. Falls back to the legacy edit path
-        # (overflow split included) on capability/permanent rejection.
+        # Rich finals edit in place, avoiding duplicate previews (#46206). Try before the 4,096 limit:
+        # rich text fits 32,768 characters and must not be split into legacy chunks unless rejected.
         if finalize and self._rich_eligible(content):
             rich_result = await self._try_edit_rich(chat_id, message_id, content, metadata=metadata)
             if rich_result is not None:
                 return rich_result
-        # Pre-flight: over-limit content is split-and-delivered on finalize; mid-stream we truncate instead
-        # (splitting moves the edit target to a continuation → infinite duplication loop).
-        # Pre-flight: if content already exceeds the limit, split-and-deliver without round-tripping a
-        # doomed edit. During streaming (finalize=False) we truncate instead of splitting — splitting
-        # creates continuation messages whose IDs become the new edit target, and on the next token chunk
-        # the full accumulated text is re-edited into the continuation, triggering another split → infinite
-        # duplication loop (#48648).
+        # Split only on finalize. Mid-stream splitting moves the edit target to a continuation and
+        # duplicates the accumulated prefix indefinitely (#48648); truncate previews instead.
         _preview_key = (str(chat_id), str(message_id))
         _saturated_preview = False
         if finalize:
@@ -3919,7 +3915,7 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
                     logger.warning(
                         "[%s] Telegram flood control, refusing edit (retry_after %.1fs > %.0fs inline cap)",
                         self.name, wait, _FLOOD_INLINE_WAIT_CAP_SECS)
-                    return _flood_cap_result(wait)
+                    return self._record_send_flood_cooldown(chat_id, wait)
                 logger.warning("[%s] Telegram flood control, waiting %.1fs", self.name, wait)
                 await asyncio.sleep(wait)
                 try:
@@ -3934,8 +3930,8 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
                         # first refusal asked for. Fail closed canonically so the ledger arms its
                         # timer on this delay rather than storing the platform's raw wording, which
                         # it would read as an ordinary failure and never redeliver.
-                        return _flood_cap_result(
-                            float(retry_wait) if retry_wait is not None else wait)
+                        return self._record_send_flood_cooldown(
+                            chat_id, float(retry_wait) if retry_wait is not None else wait)
                     return SendResult(success=False, error=safe_retry_error)
             safe_error = _redact_telegram_error_text(e)
             # Transient network errors must not permanently disable progress-message editing.
@@ -5513,7 +5509,9 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
         closed locally (same ``flood_control:<s>`` result, so ledger recognition and redelivery timing are
         unchanged) instead of firing more requests into a penalty Telegram lengthens while it is hammered."""
         until: dict[str, float] = self.__dict__.setdefault("_telegram_send_cooldown_until", {})
-        until[str(normalize_telegram_chat_id(chat_id))] = asyncio.get_running_loop().time() + max(1.0, min(float(wait), 300.0))
+        key = str(normalize_telegram_chat_id(chat_id))
+        deadline = asyncio.get_running_loop().time() + max(1.0, float(wait))
+        until[key] = max(until.get(key, 0.0), deadline)
         return _flood_cap_result(wait)
 
     def _send_flood_cooldown_remaining(self, chat_id: Any) -> Optional[float]:
@@ -5556,7 +5554,7 @@ class TelegramAdapter(TelegramGoalRecoveryMixin, TelegramHeldInboundMixin, BaseP
 
     async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
         """Send typing indicator."""
-        if not self._bot or self._typing_in_cooldown(chat_id):
+        if not self._bot or self._typing_in_cooldown(chat_id) or self._send_flood_cooldown_remaining(chat_id) is not None:
             return
         _is_dm_topic: bool = False
         message_thread_id: Optional[int] = None
