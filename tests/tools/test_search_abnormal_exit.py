@@ -9,9 +9,12 @@ shell lanes.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pytest
 
-from tools.environments.local import LocalEnvironment
+from tools.environments.local import LocalEnvironment, _kill_process_group_posix, _record_process_group
 from tools.file_operations import ShellFileOperations
 
 
@@ -65,3 +68,15 @@ def test_engine_dying_after_output_is_an_error_that_keeps_the_partial_rows(ops_f
     r = _search(*ops_for('echo "{root}/a.txt:1:needle"; kill -9 $$'))
     assert r.error and "unreliable" in r.error
     assert r.total_count == 1 and r.truncated
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs waitid(WNOWAIT) to hold a zombie")
+def test_killing_an_exited_unreaped_engine_never_raises():
+    """rg hitting the limit and exiting between poll() and the kill leaves an unreaped
+    leader; macOS answers getpgid() on it with ESRCH. The spawn-time pgid record is
+    what lets the kill proceed instead of crashing the whole search."""
+    proc = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)
+    _record_process_group(proc)
+    os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped
+    _kill_process_group_posix(proc)
+    assert proc.wait() == 0
