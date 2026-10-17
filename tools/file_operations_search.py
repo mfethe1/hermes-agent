@@ -4,6 +4,7 @@
 (no I/O).
 """
 
+import dataclasses
 import os
 import posixpath
 import re
@@ -196,8 +197,30 @@ _MATCH_LINE_RE = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
 _OUTPUT_MODE_FLAGS = {"files_only": "-l", "count": "-c"}
 
 
+# 0 match, 1 none, 2 rg/grep error (partial-tolerant, guarded below), 124 our
+# timeout marker, 141 SIGPIPE from a truncating ``| head`` under pipefail.
+_SEARCH_OK_EXITS = frozenset({0, 1, 2, 124, 141})
+
+
 def _parse_search_output(result, output_mode: str, limit: int, offset: int,
                          context: int, warning: Optional[str] = None) -> SearchResult:
+    """``_parse_search_payload``, but a DEAD engine (signal, 127, any status outside
+    ``_SEARCH_OK_EXITS``) is always an error — never a clean "0 matches". Whatever it
+    printed first is kept but flagged: merged stderr can pass for result rows."""
+    parsed = _parse_search_payload(result, output_mode, limit, offset, context, warning)
+    code = result.exit_code
+    if code in _SEARCH_OK_EXITS or parsed.error:
+        return parsed
+    died = f"killed by signal {-code}" if code < 0 else f"exited abnormally (exit {code})"
+    detail = _split_tool_diagnostics(_search_stdout_and_limit(result)[0])[0].strip()
+    return dataclasses.replace(
+        parsed, truncated=True, limit_reason=parsed.limit_reason or "engine_aborted",
+        error=f"Search failed: engine {died}" + (f": {detail}" if detail else "")
+        + ("; partial output is unreliable" if parsed.total_count else ""))
+
+
+def _parse_search_payload(result, output_mode: str, limit: int, offset: int,
+                          context: int, warning: Optional[str] = None) -> SearchResult:
     """Parse rg/grep ``| head`` output into a SearchResult (shared by both engines).
     Exit codes: 0=matches, 1=none, 2=error — but both tools return 2 on PARTIAL
     errors (one unreadable file), so an error is surfaced only when exit==2 AND no
