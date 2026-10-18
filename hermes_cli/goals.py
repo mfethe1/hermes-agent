@@ -668,6 +668,30 @@ def save_goal(session_id: str, state: GoalState) -> None:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 
 
+def _save_goal_if_unchanged(session_id: str, state: GoalState, expected: str) -> bool:
+    """Commit an update only while the exact durable goal snapshot remains current."""
+    db = _get_session_db()
+    if db is None:
+        return False
+    try:
+        key = _meta_key(session_id)
+        raw = db.get_meta(key)
+        # Canonicalize old rows too: missing optional fields must not invalidate a healthy goal.
+        if not raw or GoalState.from_json(raw).to_json() != expected:
+            return False
+        return db._write_rowcount(
+            "UPDATE state_meta SET value = ? WHERE key = ? AND value = ?",
+            (state.to_json(), key, raw),
+        ) == 1
+    except Exception as exc:
+        logger.warning("GoalManager: conditional save failed for %s: %s", session_id, exc, exc_info=True)
+        return False
+
+
+class _GoalEvaluationSuperseded(RuntimeError):
+    """Another durable control changed the goal while its judge or gate was running."""
+
+
 def clear_goal(session_id: str) -> None:
     """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
     state = load_goal(session_id)
@@ -1098,6 +1122,8 @@ class GoalManager:
         self.session_id = session_id
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS)
         self._state: Optional[GoalState] = load_goal(session_id)
+        self._persisted_snapshot = self._state.to_json() if self._state is not None else None
+        self._evaluation_expected: Optional[str] = None
 
     # --- introspection ------------------------------------------------
 
@@ -1143,7 +1169,14 @@ class GoalManager:
     # --- mutation -----------------------------------------------------
 
     def _save(self) -> Optional[GoalState]:
-        save_goal(self.session_id, self._state)
+        snapshot = self._state.to_json() if self._state is not None else None
+        if self._evaluation_expected is not None:
+            if not _save_goal_if_unchanged(self.session_id, self._state, self._evaluation_expected):
+                raise _GoalEvaluationSuperseded
+            self._evaluation_expected = snapshot
+        else:
+            save_goal(self.session_id, self._state)
+        self._persisted_snapshot = snapshot
         return self._state
 
     def _require_goal(self) -> GoalState:
@@ -1483,6 +1516,30 @@ class GoalManager:
         background_processes: Optional[list[dict[str, Any]]] = None,
         active_delegations: int = 0,
     ) -> dict[str, Any]:
+        """Discard stale evaluation writes and continuation after a durable goal control wins."""
+        self._evaluation_expected = self._persisted_snapshot
+        try:
+            if self.is_active():
+                current = load_goal(self.session_id)
+                if current is None or current.to_json() != self._evaluation_expected:
+                    raise _GoalEvaluationSuperseded
+            return self._evaluate_after_turn(
+                last_response, user_initiated=user_initiated,
+                background_processes=background_processes, active_delegations=active_delegations,
+            )
+        except _GoalEvaluationSuperseded:
+            self._state = load_goal(self.session_id)
+            self._persisted_snapshot = self._state.to_json() if self._state is not None else None
+            return _decision(self._state.status if self._state else None, False, None, "skipped",
+                             "goal state changed during evaluation", "")
+        finally:
+            self._evaluation_expected = None
+
+    def _evaluate_after_turn(
+        self, last_response: str, *, user_initiated: bool = True,
+        background_processes: Optional[list[dict[str, Any]]] = None,
+        active_delegations: int = 0,
+    ) -> dict[str, Any]:
         """Run gates + judge and update state. Return a decision dict (``status``, ``should_continue``,
         ``continuation_prompt``, ``verdict``, ``reason``, ``message``). Both real user prompts and our
         own continuations increment ``turns_used`` — both consume model budget."""
@@ -1496,6 +1553,8 @@ class GoalManager:
 
         state.turns_used += 1
         state.last_turn_at = time.time()
+        # Reserve the completed turn before slow judging, so /stop preserves consumed budget.
+        self._save()
 
         # Gates run BEFORE the judge: a failing gate is deterministic evidence the goal is not done,
         # so the judge is skipped and the gate's output drives the next turn (same turn budget).
