@@ -533,6 +533,17 @@ class GatewayAgentCacheMixin:
         _generation_at_interrupt = self._interrupt_running_turn(
             session_key, interrupt_reason=interrupt_reason, invalidation_reason=invalidation_reason,
         )
+        if invalidation_reason.startswith("stop_command"):
+            from gateway.goal_stop import pause_goal_if_active
+
+            def _pause_stopped_goal():
+                store = getattr(self, "session_store", None)
+                sid = getattr(running_agent, "session_id", None)
+                if not sid and store is not None:
+                    sid = store.peek_session_id(session_key)
+                return pause_goal_if_active(sid)
+
+            await self._run_in_executor_with_context(_pause_stopped_goal)
         from gateway.run import _AGENT_PENDING_SENTINEL
         # The turn's hard interrupt reaches only its in-turn children; background delegations were
         # detached at dispatch and would otherwise run to completion and wake the session later.

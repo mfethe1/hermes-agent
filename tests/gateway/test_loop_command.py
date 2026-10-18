@@ -240,10 +240,39 @@ async def test_goal_hook_failure_does_not_block_loop_completion(loop_env, caplog
 
 
 @pytest.mark.asyncio
-async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loop_env):
-    """Full wakeup path (slash-command loop, adapter present): list_active_loops,
-    fire_tick and complete_tick must each execute on an executor thread, never
-    on the event-loop thread (#92413)."""
+@pytest.mark.parametrize("post_turn", [False, True])
+async def test_gateway_goal_manager_load_runs_off_loop(loop_env, monkeypatch, post_turn):
+    sid = "sid-goal-manager"
+    goals.GoalManager(sid).set("finish the authorized work")
+    runner = _make_runner()
+    entry = SimpleNamespace(session_id=sid)
+    runner._session_entry_for_manager = AsyncMock(return_value=entry)
+    runner._warm_goals_session_db = AsyncMock()
+    loop_thread = threading.current_thread()
+    on_loop_calls = []
+    real_load = goals.load_goal
+
+    def load_goal(session_id):
+        on_loop_calls.append(threading.current_thread() is loop_thread)
+        return real_load(session_id)
+
+    monkeypatch.setattr(goals, "load_goal", load_goal)
+    if post_turn:
+        manager = await runner._post_turn_manager(entry, "goal", "goals", lambda: goals.GoalManager)
+    else:
+        manager, resolved_entry = await runner._manager_for_event(
+            _make_event("next step"), "goal", lambda: goals.GoalManager,
+        )
+        assert resolved_entry is entry
+
+    assert manager.state.goal == "finish the authorized work"
+    assert on_loop_calls == [False], "Manager loading must not hold the event-loop thread"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("injection_fails", [False, True])
+async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loop_env, injection_fails):
+    """Reads and tick writes must stay off-loop, including failed delivery rollback (#92413)."""
     runner = _make_runner()
     runner._running = True
     runner._running_agents = {}
@@ -253,6 +282,8 @@ async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loo
 
         async def handle_message(self, event):
             self.handled.append(event.text)
+            if injection_fails:
+                raise RuntimeError("delivery unavailable")
 
     runner.adapters = {Platform.DISCORD: _Adapter()}
     runner._build_process_event_source = lambda evt: SimpleNamespace(
@@ -279,12 +310,23 @@ async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loo
             on_loop_calls.append(name)
 
     real_list = loops.list_active_loops
+    real_goal_load = goals.load_goal
+    real_loop_load = loops.load_loop
     real_fire = loops.LoopManager.fire_tick
     real_complete = loops.LoopManager.complete_tick
+    real_abandon = loops.LoopManager.abandon_tick
 
     def _list_active_loops(*a, **k):
         _record("list_active_loops")
         return real_list(*a, **k)
+
+    def _load_goal(*a, **k):
+        _record("load_goal")
+        return real_goal_load(*a, **k)
+
+    def _load_loop(*a, **k):
+        _record("load_loop")
+        return real_loop_load(*a, **k)
 
     def _fire_tick(self):
         _record("fire_tick")
@@ -293,6 +335,10 @@ async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loo
     def _complete_tick(self, last_response):
         _record("complete_tick")
         return real_complete(self, last_response)
+
+    def _abandon_tick(self):
+        _record("abandon_tick")
+        return real_abandon(self)
 
     orig_sleep = asyncio.sleep
     calls = {"n": 0}
@@ -305,16 +351,23 @@ async def test_loop_wakeup_watcher_runs_every_sessiondb_call_off_loop_thread(loo
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(loops, "list_active_loops", _list_active_loops)
+        mp.setattr(goals, "load_goal", _load_goal)
+        mp.setattr(loops, "load_loop", _load_loop)
         mp.setattr(loops.LoopManager, "fire_tick", _fire_tick)
         mp.setattr(loops.LoopManager, "complete_tick", _complete_tick)
+        mp.setattr(loops.LoopManager, "abandon_tick", _abandon_tick)
         mp.setattr(asyncio, "sleep", _one_pass_sleep)
         await GatewayRunner._loop_wakeup_watcher(runner, interval=0)
 
     assert _Adapter.handled == ["/status"], _Adapter.handled
-    assert seen_calls == ["list_active_loops", "fire_tick", "complete_tick"], seen_calls
+    assert seen_calls == [
+        "list_active_loops", "load_goal", "load_loop", "fire_tick",
+        "abandon_tick" if injection_fails else "complete_tick",
+    ], seen_calls
     assert on_loop_calls == [], f"SessionDB calls ran on the event-loop thread: {on_loop_calls}"
-    # complete_tick ran (slash-command loops complete immediately).
-    assert loops.load_loop("sid-gateway-loop").ticks_fired == 1
+    persisted = loops.load_loop("sid-gateway-loop")
+    assert persisted.ticks_fired == (0 if injection_fails else 1)
+    assert not persisted.awaiting_response
 
 
 @pytest.mark.asyncio

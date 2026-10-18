@@ -81,7 +81,8 @@ class GatewayGoalsMixin:
         session_entry = await self._session_entry_for_manager(event, f"{kind} manager")
         if session_entry is None:
             return None, None
-        return factory(session_entry.session_id), session_entry
+        manager = await self._run_in_executor_with_context(factory, session_entry.session_id)
+        return manager, session_entry
 
     async def _get_goal_manager_for_event(self, event: MessageEvent):
         """Return ``(GoalManager, session_entry)`` for this event, or ``(None, None)``."""
@@ -270,7 +271,7 @@ class GatewayGoalsMixin:
         if not sid:
             return None
         await self._warm_goals_session_db(label)
-        return factory(sid)
+        return await self._run_in_executor_with_context(factory, sid)
 
     async def _post_turn_goal_continuation(
         self, *, session_entry: Any, source: Any, final_response: str,
@@ -421,10 +422,12 @@ class GatewayGoalsMixin:
             session_key = self._session_key_for_source(source)
         if session_key and session_key in self._running_agents:
             return  # busy — stays due, next scan retries
-        if goal_blocks_loop_tick(sid):
+        # Both the goal gate and manager construction read state_meta under the writer lock;
+        # offloading only tick writes still lets a contended read freeze every adapter.
+        if await self._run_in_executor_with_context(goal_blocks_loop_tick, sid):
             return
 
-        mgr = LoopManager(session_id=sid)
+        mgr = await self._run_in_executor_with_context(LoopManager, sid)
         if not mgr.is_due(now):
             return
         from agent.estop import check_paused
@@ -458,7 +461,12 @@ class GatewayGoalsMixin:
         except Exception as exc:
             logger.warning("loop wakeup injection failed for %s: %s", sid, exc)
             with suppress(Exception):
-                mgr.abandon_tick()
+                await self._run_in_executor_with_context(mgr.abandon_tick)
+
+    async def _goal_wakeup_watcher(self, interval: float = 5.0) -> None:
+        from gateway.goal_wakeups import watch_parked_goals
+
+        await watch_parked_goals(self, interval=interval)
 
     async def _loop_wakeup_watcher(self, interval: float = 15.0) -> None:
         """Fire due /loop wakeups for idle gateway sessions: a coarse ticker scans persisted loops

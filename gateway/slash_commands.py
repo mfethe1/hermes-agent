@@ -431,6 +431,10 @@ class GatewaySlashCommandsMixin(
             await self._interrupt_and_clear_session(
                 key, source, interrupt_reason=_INTERRUPT_REASON_STOP,
                 invalidation_reason=invalidation_reason)
+        from gateway.goal_stop import pause_goal_if_active
+        goal_paused = await self._run_in_executor_with_context(
+            pause_goal_if_active, getattr(session_entry, "session_id", None),
+        )
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:  # force-clean the sentinel so the session is unlocked
             await _stop(session_key, "stop_command_pending")
@@ -479,6 +483,8 @@ class GatewaySlashCommandsMixin(
                 await adapter._stop_typing_with_metadata(source.chat_id, self._reply_metadata(event))
         except Exception:
             logger.debug("Failed to clear typing on /stop with no active agent", exc_info=True)
+        if goal_paused:
+            return EphemeralReply(t("gateway.stop.stopped"))
         return t("gateway.stop.no_active")
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:

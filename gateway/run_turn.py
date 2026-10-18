@@ -386,15 +386,6 @@ class GatewayTurnMixin:
         return self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
 
     @staticmethod
-    def _pop_post_delivery_callback(adapter, key, generation):
-        """Pop the adapter's deferred post-delivery callback for ``key`` (legacy dict fallback)."""
-        if getattr(type(adapter), "pop_post_delivery_callback", None) is not None:
-            return adapter.pop_post_delivery_callback(key, generation=generation)
-        if adapter and hasattr(adapter, "_post_delivery_callbacks"):
-            return adapter._post_delivery_callbacks.pop(key, None)
-        return None
-
-    @staticmethod
     def _is_intentional_silence(agent_result, response) -> bool:
         try:
             from gateway.response_filters import is_intentional_silence_agent_result
@@ -2026,7 +2017,8 @@ class GatewayTurnMixin:
             "Discarding stale agent result for %s — generation %d is no longer current",
             _quick_key or "?", run_generation,
         )
-        self._pop_post_delivery_callback(self._delivery_adapter_for(source), _quick_key, run_generation)
+        from gateway.run_turn_callbacks import pop_post_delivery_callback
+        pop_post_delivery_callback(self._delivery_adapter_for(source), _quick_key, run_generation)
 
     @dataclasses.dataclass
     class _PreparedTurn:
@@ -2193,6 +2185,11 @@ class GatewayTurnMixin:
                 # Persist the coherent context+channel pair before execution: a crash during the
                 # human turn may be followed by an internal startup-resume on the next process.
                 await self._persist_prompt_pins(session_key, _run_start_session_id)
+            from gateway.goal_wakeups import goal_wakeup_allowed
+            if getattr(event, '_goal_wakeup_identity', None) is not None and not await self._run_in_executor_with_context(
+                goal_wakeup_allowed, event, _run_start_session_id,
+            ):
+                return
             agent_result = await self._run_agent(
                 message=message_text, context_prompt=prepared.context_prompt, history=history, source=_turn_source,
                 session_id=_run_start_session_id, session_key=session_key,
@@ -3800,7 +3797,8 @@ class GatewayTurnMixin:
                     # this the completion path's already_sent rescan uploads every file twice.
                     result["media_already_delivered"] = _deliver_media
         # Release deferred bg-review notifications: pop (no double-fire in base.py's finally) and call.
-        _bg_cb = self._pop_post_delivery_callback(adapter, session_key, turn_ctx.run_generation)
+        from gateway.run_turn_callbacks import pop_post_delivery_callback
+        _bg_cb = pop_post_delivery_callback(adapter, session_key, turn_ctx.run_generation)
         if callable(_bg_cb):
             with suppress(Exception):
                 _bg_result = _bg_cb()
