@@ -11,6 +11,7 @@ call time.
 """
 
 import logging
+import math
 import threading
 import time
 import uuid
@@ -24,10 +25,16 @@ logger = logging.getLogger("tools.approval")
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("acknowledged", "cancelled", "data", "event", "reason", "result", "settle")
+    # Preserve all ordinary entry fields; declare guarded fields explicitly so
+    # static checking and runtime descriptors agree about the owned contract.
+    __slots__ = ("_deadline", "_request_owner", "acknowledged", "cancelled", "data",
+                 "event", "reason", "result", "settle")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, request_owner=None):
         self.event = threading.Event()
+        self._request_owner = request_owner
+        self._deadline = (time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+                          if request_owner is not None else None)
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)
         self.acknowledged = False
@@ -41,8 +48,27 @@ class _ApprovalEntry:
         # followers and teardown read it so a withdrawn prompt never renders as a user deny.
         self.cancelled: str | None = None
 
+    @property
+    def deadline(self) -> float | None:
+        """Guarded authority expires from creation, never from notifier return."""
+        return self._deadline
 
-def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
+    def _restrict_deadline(self, request_owner, deadline):
+        """Tighten owned authority before polling; caller holds approval._lock.
+
+        The opaque owner must match. Notification can never extend the creation
+        deadline or mutate an ordinary/unowned approval.
+        """
+        if (request_owner is None or self._request_owner is not request_owner or
+                self._deadline is None or type(deadline) not in (int, float) or
+                not math.isfinite(deadline) or self.event.is_set()):
+            return False
+        self._deadline = min(self._deadline, float(deadline))
+        return True
+
+
+def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str,
+                deadline: float | None = None) -> str:
     """Wait on *event* until it fires, the turn is interrupted, or approvals.timeout
     elapses; returns ``"set"`` | ``"interrupted"`` | ``"timeout"``. Polls in ~1s
     slices so activity heartbeats reach the agent's inactivity tracker every ~10s —
@@ -55,7 +81,8 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     per-thread interrupt-cause channel (``get_interrupt_reason()``, a trusted fixed
     category), never inferred from message text, so the caller can report a
     withdrawn prompt without inventing a user refusal."""
-    deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+    if deadline is None:
+        deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
@@ -130,7 +157,8 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     return _finish(payload, resolved, choice, getattr(leader, "reason", None), coalesced=True, **extra)
 
 
-def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *, surface: str = "gateway") -> dict:
+def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
+                            surface: str = "gateway", request_owner=None) -> dict:
     """Enqueue *approval_data*, notify the user, and block until resolved or timed
     out. Shared by the terminal command guard, the execute_code guard, the plugin
     escalation gate, and MCP elicitation. Returns ``{"resolved", "choice",
@@ -157,14 +185,15 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
     keys = list(approval_data.get("pattern_keys") or [])
     with _approval._lock:
         leader = next((e for e in _approval._gateway_queues.get(session_key, [])
-                       if e.data.get("command") == approval_data.get("command")
+                       if e._request_owner is None
+                       and e.data.get("command") == approval_data.get("command")
                        and list(e.data.get("pattern_keys") or []) == keys), None)
-    if leader is not None and not preparing_terminal_approval():
+    if request_owner is None and leader is not None and not preparing_terminal_approval():
         adopted = _await_coalesced_leader(session_key, leader, payload)
         if adopted is not None:
             return adopted
 
-    entry = _ApprovalEntry(approval_data)
+    entry = _ApprovalEntry(approval_data, request_owner=request_owner)
     with _approval._lock:
         register_prepared_approval(session_key, entry)
         _approval._gateway_queues.setdefault(session_key, []).append(entry)
@@ -212,8 +241,14 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
             human.outcome = "notify_failed"
             return {"resolved": False, "choice": None, "notify_failed": True}
 
-        state = _poll_event(entry.event, session_key,
-                            interrupt_log="Approval wait interrupted — returning deny for session %s")
+        # Keep the ordinary private hook ABI intact; only guarded entries need
+        # the creation-time deadline that must include notification latency.
+        if request_owner is None:
+            state = _poll_event(entry.event, session_key,
+                                interrupt_log="Approval wait interrupted — returning deny for session %s")
+        else:
+            state = _poll_event(entry.event, session_key, deadline=entry.deadline,
+                                interrupt_log="Approval wait interrupted — returning deny for session %s")
         cancelled = _cancel_cause(state, entry)
         if state == "interrupted":
             # Coalesced followers wake with the cause instead of a deny nobody issued.
