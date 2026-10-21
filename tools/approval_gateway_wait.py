@@ -193,6 +193,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         if adopted is not None:
             return adopted
 
+    if request_owner is not None and type(request_owner) is not object:
+        raise ValueError("request_owner must be an opaque native capability")
     entry = _ApprovalEntry(approval_data, request_owner=request_owner)
     with _approval._lock:
         register_prepared_approval(session_key, entry)

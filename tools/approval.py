@@ -790,7 +790,7 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
-                    is_ask: bool, smart: bool = False, pending_body=None) -> dict:
+                    is_ask: bool, smart: bool = False, pending_body=None, request_owner=None) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
@@ -800,13 +800,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     from agent.redact import redact_sensitive_text
 
     smart_denied = False
-    if smart:
+    if smart and request_owner is None:
         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
                                            session_key, human_present=is_cli or is_gateway or is_ask)
         if result is not None:
             return result
     pending_body = pending_body() if pending_body else None
-    allow_permanent = not smart_denied
+    allow_permanent = not smart_denied and request_owner is None
 
     def deny(template: str, outcome: str, **fmt) -> dict:
         breaker = ""
@@ -820,7 +820,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
 
     def grant(choice: str) -> dict:
         # A smart-DENY owner override is always one operation, even if an older client returns "session" or "always".
-        if not smart_denied:
+        if request_owner is not None and choice != "once":
+            return _blocked("BLOCKED: Request-bound approval requires an exact one-shot response.",
+                            pattern_key=pattern_key, description=description)
+        if not smart_denied and request_owner is None:
             _persist_choice(session_key, choice, pattern_keys)
         if spec.user_approved:
             return _user_approved(session_key, description)
@@ -855,12 +858,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             data = {
                 "command": display_command, "pattern_key": pattern_key,
                 "pattern_keys": pattern_keys, "description": display_description,
-                "allow_permanent": not smart_denied,
-                "allow_session": not smart_denied,
+                "allow_permanent": allow_permanent,
+                "allow_session": allow_permanent,
             }
             if smart_denied:
                 data["smart_denied"] = True
-            decision = _await_gateway_decision(session_key, notify_cb, data, surface="gateway")
+            wait_kwargs = {"request_owner": request_owner} if request_owner is not None else {}
+            decision = _await_gateway_decision(session_key, notify_cb, data, surface="gateway", **wait_kwargs)
             if decision.get("notify_failed"):
                 return _denied(spec.notify_failed, pattern_key=pattern_key,
                                description=description, outcome="notify_failed", noun=spec.noun)
@@ -883,6 +887,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                             reason_addendum=(f' Reason given by the user: "{deny_reason}".' if deny_reason else ""),
                             timeout_addendum="", deny_reason=deny_reason)
             return grant(choice)
+
+        if request_owner is not None:
+            return _blocked("BLOCKED: Request-bound approval has no owner-bound gateway notifier.",
+                            pattern_key=pattern_key, description=description)
 
         # No gateway callback (cron, batch, or ask-mode leaked into an interactive CLI, historically via `import
         # gateway.run`): paint the local panel when possible instead of a pending_approval that makes the agent look
@@ -965,6 +973,7 @@ def _run_approval_gate(
     advice: str = "Find an alternative approach that avoids this action.",
     cron_deny_message: str = "", single_query_deny_message: str = "", unattended_deny_message: str = "",
     autoapprove_log_prefix: str, fail_closed_when_no_human: bool = False, no_human_block_message: str = "",
+    request_owner=None,
 ) -> dict:
     """Shared human-approval gate for a flagged action (tool call or write): decision core for
     :func:`request_tool_approval` and the file-tool write gates.
@@ -977,6 +986,19 @@ def _run_approval_gate(
     Unattended deny text is ``ctx.block_message(subject, noun, advice)`` unless the caller passes
     an explicit ``*_deny_message`` (the file-tool write gates word their own).
     """
+    if request_owner is not None:
+        # A native capability selects the same queue/waiter, never an automation,
+        # cache, CLI/FIFO, guardian or persistent-approval shortcut. This is a
+        # binding capability, not proof of human identity or assent.
+        if type(request_owner) is not object:
+            return _blocked("BLOCKED: Invalid request-bound approval owner.",
+                            pattern_key=pattern_key, description=description)
+        return _human_decision(
+            _ACTION_GATE, command=display_target, description=description,
+            pattern_key=pattern_key, pattern_keys=[pattern_key],
+            session_key=get_current_session_key(), approval_callback=None,
+            is_cli=False, is_gateway=True, is_ask=False, request_owner=request_owner,
+        )
     # Hardline blocks are the caller's job BEFORE this gate, so yolo here only skips the recoverable approval layer.
     # ``approvals.mode: off`` is the third bypass source (the Desktop "Approvals: off" toggle writes it); the shell
     # guards honour it, so every action routed through this gate (computer_use, plugin rules, SSH-config writes,
@@ -1112,7 +1134,8 @@ def check_dangerous_command(command: str, env_type: str,
     )
 
 
-def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", approval_callback=None) -> dict:
+def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", approval_callback=None,
+                          request_owner=None) -> dict:
     """Escalate an arbitrary tool call to the human-approval gate.
 
     Entry point for a plugin ``pre_tool_call`` hook returning ``{"action": "approve", ...}``:
@@ -1123,6 +1146,8 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     allowlist grain; when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons
     on the same tool persist independently. Returns the ``check_dangerous_command`` result shape.
     """
+    # request_owner is a native in-process capability, not a tool/payload field.
+    # Its response must use resolve_request_bound_approval; pending UI data is evidence only.
     description = reason or f"Plugin requires approval for {tool_name}"
     if not rule_key:
         rule_key = f"{tool_name}:{hashlib.sha256(description.encode('utf-8')).hexdigest()[:12]}"
@@ -1134,7 +1159,7 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
         display_target=f"<{tool_name}> (plugin approval rule)", approval_callback=approval_callback,
         subject=subject, advice="Find an alternative approach.",
         autoapprove_log_prefix=f"plugin-escalated tool call '{tool_name}' in non-interactive non-gateway context",
-        fail_closed_when_no_human=True,
+        fail_closed_when_no_human=True, request_owner=request_owner,
         no_human_block_message=(f"BLOCKED: {subject} but no interactive user or gateway is present "
                                 "to approve it. A plugin flagged this action for human confirmation."),
     )
