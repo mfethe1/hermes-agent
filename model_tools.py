@@ -708,6 +708,10 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
     tool_call should be re-dispatched as the real tool.
     """
     try:
+        from tools.tool_labels import BRIDGE_TOOL_NAMES
+        # Ordinary tools must not load the deferred-tool catalog and connector graph.
+        if function_name not in BRIDGE_TOOL_NAMES:
+            return None
         from tools import tool_search as ts
     except Exception:
         return None
