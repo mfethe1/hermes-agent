@@ -16,6 +16,39 @@ Hermes ships three protocols for driving the agent from external programs — ID
 
 All three drive the same `AIAgent` core. They differ only in wire format and which set of features they expose.
 
+## Native Python: iteration-budget summaries
+
+`AIAgent` accepts `allow_budget_summary: bool = True`. The default preserves the
+existing model-summary request when the iteration budget is exhausted. Explicitly
+pass `False` to skip that finalizer request and return a local incomplete notice
+instead. Non-boolean values raise `TypeError` during construction.
+
+```python
+from run_agent import AIAgent
+
+# Uses the configured provider/model; admit that route before running this example.
+agent = AIAgent(
+    max_iterations=1,
+    enabled_toolsets=[],
+    skip_context_files=True,
+    skip_memory=True,
+    skip_background_review=True,
+    allow_budget_summary=False,
+)
+result = agent.run_conversation("Answer briefly without using tools.")
+```
+
+An exhausted turn retains `turn_exit_reason="max_iterations_reached(...)"` and
+`completed=False`, not a successful completion. A genuine answer held by a
+pending-verification gate is still preserved with its existing provenance;
+interrupted and failed exits keep their existing behavior.
+
+This constructor option only controls the iteration-budget summary. It is not a
+single-request or full-isolation guarantee: SDK retries, malformed-call handling,
+plugins, fallback providers, and other inference paths are unchanged. Voice or
+provider use still requires separate admission and verification; this example
+does not establish a complete voice integration or expose a new HTTP setting.
+
 ---
 
 ## ACP (Agent Client Protocol)

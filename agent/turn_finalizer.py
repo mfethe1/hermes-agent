@@ -147,6 +147,12 @@ def _resolve_budget_fallback(
                 # Reuses the candidate the user already saw sealed as an interim (#130396).
                 agent._reused_response_text = final_response
             preserved_verification_fallback = True
+        elif getattr(agent, "allow_budget_summary", True) is False:
+            # Local close only: do not reuse unrelated held text or request a summary.
+            final_response = (
+                f"Iteration budget exhausted ({api_call_count}/{agent.max_iterations}). "
+                "This turn is incomplete. No additional model summary was requested."
+            )
         else:
             # _handle_max_iterations makes one extra toolless request for a summary.
             agent._emit_diagnostic_status(
@@ -590,6 +596,11 @@ def finalize_turn(
         and not failed
         and not interrupted
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        # A shared budget can run out before this agent reaches its own iteration cap.
+        and not (
+            getattr(agent, "allow_budget_summary", True) is False
+            and str(_turn_exit_reason).startswith("max_iterations_reached(")
+        )
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)

@@ -2367,7 +2367,10 @@ def init_agent(
     requested_provider: str | None = None, capabilities: Optional[dict[str, bool]] = None, cwd: Optional[str] = None,
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+    allow_budget_summary: bool = True,
 ):
+    if not isinstance(allow_budget_summary, bool):
+        raise TypeError("allow_budget_summary must be a bool")
     _install_safe_stdio()
 
     _params = locals()
@@ -2378,6 +2381,7 @@ def init_agent(
     agent.session_cwd = cwd or None
     # Shared iteration budget: parent creates, children inherit.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
+    agent.allow_budget_summary = allow_budget_summary
     # CLI replaces this with _cprint so raw ANSI status lines go through prompt_toolkit's
     # renderer (StdoutProxy would mangle them). None = builtins.print.
     agent._print_fn = None
