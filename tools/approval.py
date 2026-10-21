@@ -17,6 +17,7 @@ import importlib
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
@@ -140,26 +141,42 @@ def resolve_gateway_approval(session_key: str, choice: str,
                              resolve_all: bool = False,
                              reason: Optional[str] = None,
                              request_id: Optional[str] = None) -> int:
-    """Unblock waiting agent thread(s) from the gateway's /approve or /deny handler.
+    """Resolve ordinary approvals only; guarded requests require their owner ingress."""
+    return _resolve_gateway_approval(session_key, choice, resolve_all, reason, request_id, None)
 
-    *resolve_all* resolves every pending approval (``/approve all``); otherwise the oldest
-    (FIFO) or the one matching *request_id*. *reason* is the ``/deny <reason>`` free text,
-    relayed to the agent in the BLOCKED message. Returns the number resolved.
+
+def resolve_request_bound_approval(session_key: str, choice: str, request_id: str,
+                                   request_owner) -> int:
+    """Trusted transport contract, not authentication: exact owner/request, once or deny.
+
+    The owner token never enters prompt data. Arbitrary in-process code is out of scope.
+    Invalid replies leave the queue unchanged; no FIFO or persistent grants here.
+    Session keys and notify_cb(data) retain the ordinary gateway's existing ABI.
     """
+    if (type(session_key) is not str or not session_key or
+            type(request_id) is not str or not request_id or
+            type(choice) is not str or choice not in ('once', 'deny') or
+            type(request_owner) is not object):
+        return 0
+    return _resolve_gateway_approval(session_key, choice, False, None, request_id, request_owner)
+
+
+def _resolve_gateway_approval(session_key, choice, resolve_all, reason, request_id, request_owner):
     with _lock:
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
+        eligible = [entry for entry in queue if entry._request_owner is request_owner
+                    and (request_owner is None or time.monotonic() < entry.deadline)]
         if request_id:
-            targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
-            if not targets:
-                return 0
-            queue[:] = [entry for entry in queue if entry not in targets]
+            targets = [entry for entry in eligible if entry.data.get("request_id") == request_id]
         elif resolve_all:
-            targets = list(queue)
-            queue.clear()
+            targets = eligible
         else:
-            targets = [queue.pop(0)]
+            targets = eligible[:1]
+        if not targets:
+            return 0
+        queue[:] = [entry for entry in queue if entry not in targets]
         if not queue:
             _gateway_queues.pop(session_key, None)
         # Popping the entry and committing its outcome are ONE critical section: the waiter's

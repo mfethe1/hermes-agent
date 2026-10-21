@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from contextlib import contextmanager
 import copy
 import inspect
 import logging
+import math
 import queue
 import re
 import threading
@@ -157,6 +159,59 @@ _MAX_HOOK_CALLBACK_TIMEOUT_SECS = 600.0
 _HOOK_SKIPPED = object()  # returned by _run_hook_callback_bounded on skip/timeout
 
 
+@dataclass(frozen=True)
+class _HookDisposition:
+    invocation: object
+    callback_identity: int
+    status: str
+
+
+class _HookObservation:
+    __slots__ = ("active", "invocation", "receipt", "timeout_cap")
+
+    def __init__(self, timeout_cap: float | None = None):
+        if timeout_cap is not None and (type(timeout_cap) not in (int, float) or
+                                        not math.isfinite(timeout_cap) or timeout_cap <= 0):
+            raise ValueError("finite positive owned callback cap required")
+        self.timeout_cap = timeout_cap
+        self.active = True
+        self.invocation = object()
+        self.receipt: _HookDisposition | None = None
+
+
+_hook_observation: contextvars.ContextVar[
+    tuple[Any, str, Callable, _HookObservation, int] | None
+] = contextvars.ContextVar("native_hook_observation", default=None)
+
+
+@contextmanager
+def _observe_hook_callback(manager, hook_name, callback, *, timeout_cap=None):
+    """Trusted synchronous owner capability, one invocation per scope; no authority.
+
+    Receipt absent means no native observation. Unbounded dispatch explicitly refuses
+    completion evidence. Caller binds the opaque invocation to its own operation;
+    payload IDs, results and exception text are never classification inputs.
+    Arbitrary in-process mutation is outside this private contract's trust boundary.
+    """
+    scope = _HookObservation(timeout_cap)
+    token = _hook_observation.set((manager, hook_name, callback, scope, threading.get_ident()))
+    try:
+        yield scope
+    finally:
+        scope.active = False
+        _hook_observation.reset(token)
+
+
+def _record_hook_disposition(manager, hook_name, callback, status):
+    observation = _hook_observation.get()
+    if observation is None:
+        return
+    owner, hook, cb, scope, thread = observation
+    if (owner is manager and hook == hook_name and cb is callback
+            and thread == threading.get_ident() and scope.active and scope.receipt is None):
+        scope.receipt = _HookDisposition(scope.invocation, id(callback), status)
+
+
 def _hook_call_identity(kwargs: dict[str, Any]) -> Optional[str]:
     """Identity of the call this callback fires for, or ``None`` when the event has none.
 
@@ -235,6 +290,7 @@ class PluginDispatchMixin:
                             results.append({"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE})
                         continue
                 else:
+                    _record_hook_disposition(self, hook_name, cb, "unavailable-unbounded")
                     ret = self._invoke_hook_callback(cb, kwargs)
                 if ret is not None:
                     results.append(ret)
@@ -275,6 +331,15 @@ class PluginDispatchMixin:
         suppressed, still running for this call id, over the abandoned-worker cap, timed out
         (worker abandoned, never joined), or the worker could not be started. Exceptions
         propagate."""
+        # Only the exact synchronous observed owner may shorten this callback.
+        # Other callbacks retain the shared gateway's configured budget.
+        observation = _hook_observation.get()
+        if observation is not None:
+            owner, hook, observed, scope, thread = observation
+            if (owner is self and hook == hook_name and observed is cb and
+                    thread == threading.get_ident() and scope.active and
+                    scope.timeout_cap is not None and timeout > 0):
+                timeout = min(timeout, scope.timeout_cap)
         callback_name = getattr(cb, "__name__", repr(cb))
         # Suppression is a fact about the CALLBACK — a hung one must keep its back-off —
         # so that key stays coarse. The gate must instead tell CONCURRENT CALLS apart.
@@ -288,6 +353,7 @@ class PluginDispatchMixin:
                 logger.warning(
                     "Hook '%s' callback %s skipped after previous "
                     "timeout or while still running", hook_name, callback_name)
+                _record_hook_disposition(self, hook_name, cb, "unavailable")
                 return _HOOK_SKIPPED
             # Workers abandoned on timeout still hold threads. Once the suppression window has
             # passed, a fresh call id may start a new worker (a hung guard must not fail every
@@ -301,12 +367,14 @@ class PluginDispatchMixin:
                     "Hook '%s' callback %s (%s) skipped: %d abandoned worker(s) still running — "
                     "the plugin is hung; fix or disable it (retried when a worker finishes)",
                     hook_name, callback_name, getattr(cb, "__module__", "unknown plugin"), len(abandoned))
+                _record_hook_disposition(self, hook_name, cb, "unavailable")
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(suppression_key, None)
             self._hook_running_callbacks[gate_key] = token
 
         context = contextvars.copy_context()
+        context.run(_hook_observation.set, None)  # no late-worker collector or nested-owner leak
         done = threading.Event()
         outcome: dict[str, Any] = {}
         failure: dict[str, BaseException] = {}
@@ -338,6 +406,7 @@ class PluginDispatchMixin:
             logger.warning(
                 "Hook '%s' callback %s worker failed to start: %s — skipping",
                 hook_name, callback_name, exc)
+            _record_hook_disposition(self, hook_name, cb, "unavailable")
             return _HOOK_SKIPPED
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
@@ -351,9 +420,12 @@ class PluginDispatchMixin:
                     self._hook_abandoned.setdefault(suppression_key, set()).add(gate_key)
             logger.warning(
                 "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout)
+            _record_hook_disposition(self, hook_name, cb, "timeout")
             return _HOOK_SKIPPED
         if "exc" in failure:
+            _record_hook_disposition(self, hook_name, cb, "exception")
             raise failure["exc"]
+        _record_hook_disposition(self, hook_name, cb, "completed")
         return outcome.get("value")
 
     def _subscribe_event(self, owner: str, event: str, callback: Callable) -> None:
@@ -503,6 +575,7 @@ class PluginDispatchMixin:
         for cb in self._hooks.get(hook_name, []):
             callback_name = getattr(cb, "__name__", repr(cb))
             try:
+                _record_hook_disposition(self, hook_name, cb, "unavailable-async")
                 ret = cb(**self._hook_callback_kwargs(cb, kwargs))
                 if inspect.isawaitable(ret):
                     ret = await (asyncio.wait_for(ret, timeout) if use_timeout else ret)

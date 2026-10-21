@@ -683,9 +683,10 @@ BEGIN
       AND display_identity = new.display_identity
       AND (new.active = 1 OR new.compacted = 1);
     UPDATE messages SET display_order = (
-        SELECT MIN(peer.id) FROM messages AS peer
+        SELECT MIN(peer.id) FROM messages AS peer INDEXED BY idx_messages_display_identity
         WHERE peer.session_id = old.session_id AND (peer.active = 1 OR peer.compacted = 1)
           AND peer.display_identity = old.display_identity
+          AND peer.display_identity IS NOT NULL
     ) WHERE session_id = old.session_id AND (active = 1 OR compacted = 1)
       AND display_identity = old.display_identity
       AND NOT (new.active = 1 OR new.compacted = 1);
@@ -709,13 +710,15 @@ BEGIN
     );
 END;
 DROP TRIGGER IF EXISTS messages_display_identity_delete;
+-- Keep MIN(id) within the identity group; a session scan holds the shared writer.
 CREATE TRIGGER IF NOT EXISTS messages_display_identity_delete
 AFTER DELETE ON messages WHEN old.active = 1 OR old.compacted = 1
 BEGIN
     UPDATE messages SET display_order = (
-        SELECT MIN(peer.id) FROM messages AS peer
+        SELECT MIN(peer.id) FROM messages AS peer INDEXED BY idx_messages_display_identity
         WHERE peer.session_id = old.session_id AND (peer.active = 1 OR peer.compacted = 1)
           AND peer.display_identity = old.display_identity
+          AND peer.display_identity IS NOT NULL
     ) WHERE session_id = old.session_id AND (active = 1 OR compacted = 1)
       AND display_identity = old.display_identity;
 END;

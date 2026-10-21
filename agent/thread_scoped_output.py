@@ -15,6 +15,8 @@ import sys
 import threading
 from typing import Iterator, TextIO
 
+from agent.process_bootstrap import _SafeWriter
+
 __all__ = ["thread_scoped_silence"]
 
 _install_lock = threading.Lock()
@@ -91,7 +93,13 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> _ThreadRoutingStream:
     """Install (idempotently) a routing proxy as ``sys.<attr>`` and return it."""
     with _install_lock:
         proxy = _installed.get(attr)
-        current = getattr(sys, attr, None)
+        bound_stream = getattr(sys, attr, None)
+        current = bound_stream
+        # Agent bootstrap may wrap our proxy in safe stdio. Reuse the routing
+        # below it without displacing that wrapper; alternating installations
+        # otherwise grow a chain until logging attribute access recurses out.
+        while isinstance(current, _SafeWriter):
+            current = current._inner
         if isinstance(current, _ThreadRoutingStream):
             # A redirect context may restore an older proxy; adopt it rather
             # than wrapping it into an unbounded chain.
@@ -102,7 +110,7 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> _ThreadRoutingStream:
             return proxy
         # Route non-silenced threads to whatever is currently bound (an active
         # global redirect keeps its old behavior).
-        passthrough = current if current is not None else passthrough
+        passthrough = bound_stream if bound_stream is not None else passthrough
         sink = _sinks.get(attr)
         if sink is None or sink.closed:
             sink = _sinks[attr] = open(os.devnull, "w", encoding="utf-8")

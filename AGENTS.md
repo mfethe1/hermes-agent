@@ -1,18 +1,11 @@
 # Hermes Agent - Development Guide
 
-For AI coding assistants and developers working on hermes-agent. This root file is a hub: what
-applies everywhere, then a routing table. Each area's `AGENTS.md` loads automatically when you work
-in that directory; read it before editing there. `python scripts/check` caps this file at 12k chars
-and every root-to-area chain at 30k, so it loads whole on 128k+ models: long form goes in the guide.
-
 **Never give up on the right solution.**
 
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a messaging
-gateway (Telegram, Discord, Slack, ~20 platforms), a TUI, and an Electron desktop app. It
-learns across sessions (memory + skills), delegates to subagents, runs scheduled jobs, and
-drives a real terminal and browser. It is extended primarily through **plugins and skills**,
+gateway (Telegram, Discord). It is extended primarily through **plugins and skills**,
 not by growing the core.
 
 Two invariants shape almost every design decision and are the lens for reviewing any change:
