@@ -112,7 +112,8 @@ def spotify_in_use(home: Path, *, process_env: bool = False) -> bool:
     for a platform. The tools were opt-in and login-gated, so a client id alone is not use."""
     import json
     try:
-        store = json.loads((home / "auth.json").read_text(encoding="utf-8-sig"))
+        auth_path = home / "auth.json"
+        store = json.loads(auth_path.read_text(encoding="utf-8-sig")) if auth_path.exists() else {}
     except (OSError, ValueError):  # missing/unreadable/invalid JSON: no login we can see
         store = {}
     providers = store.get("providers") if isinstance(store, dict) else None

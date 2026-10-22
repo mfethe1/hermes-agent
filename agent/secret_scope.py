@@ -361,6 +361,11 @@ def load_env_file(env_path: Path) -> dict[str, str]:
     """
     key = str(env_path)
     try:
+        # An absent profile has no credentials to load. Avoid an unnecessary
+        # credential-file open during isolated startup, and discard stale cache.
+        if not Path(env_path).exists():
+            invalidate_env_file_cache(env_path)
+            return {}
         with open(env_path, "rb") as handle:
             fingerprint = file_signature(os.fstat(handle.fileno()))
             with _ENV_FILE_CACHE_LOCK:

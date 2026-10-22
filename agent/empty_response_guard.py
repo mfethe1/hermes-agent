@@ -147,6 +147,8 @@ def _estimate_attempt_cost(agent: Any, response: Any) -> Optional[Decimal]:
         result = estimate_usage_cost(
             getattr(agent, "model", "") or "", canonical, provider=getattr(agent, "provider", None),
             base_url=getattr(agent, "base_url", None), api_key=getattr(agent, "api_key", None),
+            **({"allow_network": False}
+               if getattr(agent, "_openai_request_policy", None) is not None else {}),
         )
     except Exception:
         logger.debug("empty-guard: cost estimation failed", exc_info=True)

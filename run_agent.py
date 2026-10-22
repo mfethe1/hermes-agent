@@ -32,9 +32,12 @@ import time
 import threading
 import uuid
 import warnings
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from datetime import datetime
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from agent.native_request_policy import OpenAIRequestPolicy
 
 from agent.session_source import CLI_FAMILY_SOURCES, session_source_for
 from hermes_constants import get_hermes_home
@@ -279,6 +282,7 @@ class AIAgent(
         side_agent: bool = False, memory_manager=None,
         tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
         allow_budget_summary: bool = True,
+        openai_request_policy: Optional["OpenAIRequestPolicy"] = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
