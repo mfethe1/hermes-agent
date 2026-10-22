@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 
 def is_termux() -> bool:
@@ -17,6 +18,8 @@ _wsl_detected: bool | None = None
 def is_wsl() -> bool:
     """Return whether this process runs inside WSL."""
     global _wsl_detected
+    if sys.platform != "linux":
+        return False
     if _wsl_detected is None:
         try:
             with open("/proc/version", "r", encoding="utf-8") as f:
@@ -38,6 +41,8 @@ def is_container() -> bool:
 
 
 def _read_proc(path: str) -> str:
+    if sys.platform != "linux":
+        return ""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()

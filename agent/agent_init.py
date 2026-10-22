@@ -2172,6 +2172,9 @@ def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
     # Ollama defaults num_ctx to 2048, so detect the max window and send num_ctx per request.
     # model.ollama_num_ctx overrides; model.context_length caps the detected value (VRAM).
     agent._ollama_num_ctx: int | None = None
+    # A guarded completion capability does not authorize local-server discovery.
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        return
     _override = _model_cfg.get("ollama_num_ctx") if isinstance(_model_cfg, dict) else None
     if _override is not None:
         try:
