@@ -32,6 +32,7 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     Never raises: verification must still finalize the receipt (with an owed restart).
     """
     from hermes_cli.update_cmd_fleet import _drain_or_signal_gateway_for_update
+    from hermes_cli.update_inventory import _detect_supervisor_for_pid
 
     pids = stale_fleet_survivor_pids(fleet, set(restart.killed_pids))
     if not pids:
@@ -48,11 +49,13 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     manual: list[int] = []
     for pid in pids:
         label = f"{labels.get(pid, 'gateway')} (PID {pid})"
+        # Before the signal: a drained gateway is gone, and its ancestry with it.
+        unsupervised = _detect_supervisor_for_pid(pid, service_pids) == "manual"
         try:
             if _drain_or_signal_gateway_for_update(pid, drain_budget, label):
                 signalled.append(pid)
                 restart.killed_pids.add(pid)
-                if pid not in service_pids:
+                if unsupervised:
                     manual.append(pid)
         except Exception as exc:
             logger.warning("Could not signal stale gateway PID %s: %s", pid, exc)

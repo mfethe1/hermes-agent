@@ -67,7 +67,7 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
         # instead of killing the child, so reconciliation must plan it under its own mechanism id.
         # See #91277.
         return "windows-service"
-    if pid not in service_pids:
+    if pid not in service_pids and not _below_service_pid(pid, service_pids):
         return "manual"
     with suppress(Exception):
         from hermes_cli.gateway import is_macos, supports_systemd_services
@@ -77,6 +77,17 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
         if is_macos():
             return "launchd"
     return "service"
+
+
+def _below_service_pid(pid: int, service_pids: set) -> bool:
+    """Is a service PID an ancestor of *pid*? A launchd job's PID is its ``osascript`` front and the
+    gateway its grandchild, under the stderr-timestamp wrapper, so job-PID membership alone calls
+    every launchd gateway ``manual`` (and the update then stopped one as manual, 2026-10-24)."""
+    if not service_pids:
+        return False
+    from hermes_cli.dashboard_procs import _process_ancestors
+
+    return not set(service_pids).isdisjoint(_process_ancestors(pid))
 
 
 # THE restart policy table: restart execution consumes these ids via match_runtime_outcomes / the
