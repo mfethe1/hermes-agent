@@ -65,12 +65,15 @@ def _contains(path: str, prefix: str) -> bool:
 
 
 class HomeIOGuard:
-    def __init__(self, roots, installed_apps=lambda: ()):
+    def __init__(self, roots, installed_apps=lambda: (), launch_agents=lambda: ()):
         self.roots = roots
         # The machine's installed desktop app (``packaged_gui_app_paths()`` before any test ran):
         # deleting, replacing or writing into it is refused. Reads stay allowed: several update
         # paths only probe it.
         self.installed_apps = installed_apps
+        # The account's LaunchAgents dir, refused the same way: launchd runs a plist written there
+        # at the next login, with no launchctl call the subprocess guard could stop.
+        self.launch_agents = launch_agents
         self.checking = threading.local()
         self.directories: dict[int, Path] = {}
 
@@ -98,7 +101,7 @@ class HomeIOGuard:
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
                 return
-            resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
+            resolved = self._refuse_protected_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
             # Resolving the root itself (get_default_hermes_root's relative_to
             # probe) reads no state; only its contents are guarded.
@@ -139,11 +142,11 @@ class HomeIOGuard:
         finally:
             self.checking.active = False
 
-    def _refuse_installed_app_change(self, value, absolute):
-        """Fail on a change to an installed app (already normalized, literal and resolved);
-        returns the resolved path so check() does not resolve it again, or None."""
-        apps = self.installed_apps()
-        if not apps:
+    def _refuse_protected_change(self, value, absolute):
+        """Fail on a change to an installed app or the account's LaunchAgents (already normalized,
+        literal and resolved); returns the resolved path so check() does not resolve it again, or None."""
+        apps, agents = self.installed_apps(), self.launch_agents()
+        if not apps and not agents:
             return None
         resolved = _normcase(os.path.realpath(absolute))
         for app in apps:
@@ -153,6 +156,11 @@ class HomeIOGuard:
                 # the refusal as a warning while the test passed.
                 pytest.fail(f"TEST BUG: changing the REAL installed Hermes desktop app: {value}\n"
                             "Stub hermes_cli.gui_uninstall.packaged_gui_app_paths to a temporary path.")
+        for agents_dir in agents:
+            if _within(absolute, agents_dir) or _within(resolved, agents_dir):
+                import pytest
+                pytest.fail(f"TEST BUG: writing the REAL account LaunchAgents: {value}\n"
+                            "launchd loads it at the next login. Point get_launchd_plist_path at tmp_path.")
         return resolved
 
     @staticmethod

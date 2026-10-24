@@ -1,4 +1,4 @@
-"""The autouse live-system guard: no real kills, Hermes-unit systemctl writes, gateway spawns or checkout writes.
+"""The autouse live-system guard: no real kills, Hermes-unit systemctl writes, launchctl writes, gateway spawns or checkout writes.
 
 Imported into ``tests/conftest.py`` so pytest registers the fixture there;
 ``pytest_plugins`` is not an option because ``tests/conftest.py`` is not the
@@ -34,6 +34,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 #    ``hermes-dashboard[-<profile>]``, ``hermes-serve[-<profile>]`` and every
 #    other ``hermes``/``hermes-*`` unit. Read-only systemctl calls
 #    (``status``, ``show``, ``list-units``, ``is-active``) still pass through.
+#  • the same wrappers reject every mutating ``launchctl`` verb (``bootstrap``,
+#    ``bootout``, ``load``, ``kickstart``, ``submit``, ...) whatever the label:
+#    launchd has no per-test domain, and a run once left three
+#    ``ai.hermes.gateway-<hash>`` LaunchAgents running real gateways from
+#    pytest temp homes. ``list`` / ``print`` / ``managername`` still pass.
 #
 # We intentionally do NOT stub ``find_gateway_pids`` / ``_scan_gateway_pids``
 # here — tests of those functions themselves need the real implementation.
@@ -66,7 +71,8 @@ def _live_system_guard(request, monkeypatch):
       • pty.spawn
       • asyncio.create_subprocess_exec / create_subprocess_shell
     A mutating systemctl verb is refused against every Hermes unit
-    (``hermes``/``hermes-*``: gateway, dashboard, serve, any profile).
+    (``hermes``/``hermes-*``: gateway, dashboard, serve, any profile),
+    and a mutating launchctl verb against any label.
     Subprocess inspection looks at the WHOLE command string (not just
     tokens[0]), so ``bash -c "systemctl restart hermes-dashboard"``,
     ``sudo systemctl ...``, ``env systemctl ...``, ``setsid systemctl ...``
@@ -82,6 +88,7 @@ def _live_system_guard(request, monkeypatch):
     import os as _os
     import re as _re
     import shlex as _shlex
+    import shutil as _shutil
     import subprocess as _subprocess
 
     test_pid = _os.getpid()
@@ -197,6 +204,10 @@ def _live_system_guard(request, monkeypatch):
         "reset-failed", "enable", "disable", "mask", "unmask",
         "daemon-reload", "try-restart", "reload-or-restart",
     )
+    _LAUNCHCTL_MUTATION = _re.compile(
+        r"(?<![\w.-])launchctl[\"']?\s+[\"']?(?:bootstrap|bootout|load|unload|kickstart|kill|enable|disable"
+        r"|start|stop|remove|submit|setenv|unsetenv|config|uncache|reboot)(?![\w-])")
+    _REAL_LAUNCHCTL = _os.path.realpath("/bin/launchctl")
     _PROCESS_KILLERS = ("pkill", "killall", "taskkill", "skill", "fuser")
     _CONTAINER_RUNTIMES = ("docker", "podman", "nerdctl")
 
@@ -273,6 +284,24 @@ def _live_system_guard(request, monkeypatch):
                 or any(_is_hermes_unit(w) and w not in owned for w in words)):
             return False
         return any(verb in words for verb in _MUTATING_VERBS)
+
+    def _is_blocked_launchctl(cmd, kwargs=None) -> bool:
+        cmd_str = _cmd_to_string(cmd)
+        # ``boot\out`` is ``bootout`` to the shell that runs a ``bash -c`` payload.
+        if "launchctl" not in cmd_str or not any(
+                _LAUNCHCTL_MUTATION.search(text) for text in (cmd_str, cmd_str.replace("\\", ""))):
+            return False
+        # A fake launchctl a test put on PATH (fd-inheritance tests run one for real) is not
+        # launchd; the system binary, sudo's (secure_path) and an unresolvable one are refused.
+        words = _shell_words(cmd_str)
+        if "sudo" in words:
+            return True
+        env = (kwargs or {}).get("env")
+        path = (env if isinstance(env, dict) else _os.environ).get("PATH", _os.defpath)
+        runs = [word if "/" in word else _shutil.which("launchctl", path=path)
+                for word in words if word.rsplit("/", 1)[-1] == "launchctl"]
+        return not runs or any(not found or not _os.path.isfile(found)
+                               or _os.path.realpath(found) == _REAL_LAUNCHCTL for found in runs)
 
     def _is_process_killer(cmd) -> bool:
         cmd_str = _cmd_to_string(cmd)
@@ -361,6 +390,14 @@ def _live_system_guard(request, monkeypatch):
                 "hermes-serve*, ...). Mock "
                 "subprocess.run / _run_systemctl in the test, or "
                 "mark with @pytest.mark.live_system_guard_bypass."
+            )
+        if _is_blocked_launchctl(cmd, kwargs):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — would change the developer's "
+                "real launchd domain (a loaded LaunchAgent runs at every "
+                "login). Mock subprocess.run / the launchctl seam in the "
+                "test, or mark with @pytest.mark.live_system_guard_bypass."
             )
         if _is_process_killer(cmd):
             raise RuntimeError(

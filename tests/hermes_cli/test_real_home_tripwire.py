@@ -108,6 +108,30 @@ def test_installed_desktop_app_can_be_read_but_never_changed(tmp_path, monkeypat
     assert plist.read_text(encoding="utf-8") == "unchanged"
 
 
+def test_account_launch_agents_can_be_read_but_never_written(tmp_path, monkeypatch):
+    """A plist in the account's LaunchAgents runs at the next login (RunAtLoad) without any
+    launchctl call: three pytest temp-home gateways once kept running that way for weeks."""
+    from tests import conftest
+
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "ai.hermes.gateway.plist"
+    plist.write_text("unchanged", encoding="utf-8")
+    staged = tmp_path / "staged.plist"
+    staged.write_text("new", encoding="utf-8")
+    monkeypatch.setattr(conftest, "_REAL_LAUNCH_AGENTS", [os.path.normcase(os.path.realpath(agents))])
+    assert plist.read_text(encoding="utf-8") == "unchanged"
+    assert [p.name for p in agents.iterdir()] == [plist.name]
+    changes = [lambda: (agents / "ai.hermes.gateway-2df93972.plist").write_text("<plist/>", encoding="utf-8"),
+               lambda: plist.write_text("clobbered", encoding="utf-8"), plist.unlink,
+               lambda: staged.replace(agents / "ai.hermes.gateway-6b58992f.plist")]
+    for change in changes:
+        with pytest.raises(pytest.fail.Exception, match="REAL account LaunchAgents"):
+            change()
+    assert sorted(p.name for p in agents.iterdir()) == [plist.name]
+    assert plist.read_text(encoding="utf-8") == "unchanged"
+
+
 def test_unprotected_paths_and_open_descriptors_still_work(protected_home, tmp_path):
     target = tmp_path / "allowed" / "file.txt"
     target.parent.mkdir()

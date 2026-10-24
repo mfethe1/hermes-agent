@@ -221,6 +221,69 @@ def test_subprocess_run_setsid_systemctl_blocked():
         subprocess.run(["setsid", "systemctl", "kill", "hermes-gateway"], check=False)
 
 
+# ──────────────────── launchctl (macOS launchd) ─────────────────
+#
+# Every call here runs with an empty PATH and no absolute launchctl path: without the guard it
+# must fail with FileNotFoundError, never reach the real launchd domain. A red run of an earlier
+# draft that called /bin/launchctl directly booted the developer's live gateway job out.
+
+_NO_LAUNCHCTL = {"PATH": "/nonexistent"}
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["launchctl", "bootstrap", "gui/501", "/tmp/ai.hermes.gateway-2df93972.plist"],
+        ["/nonexistent/launchctl", "bootout", "gui/501/ai.hermes.gateway"],
+        ["launchctl", "load", "-w", "/tmp/ai.hermes.gateway.plist"],
+        ["launchctl", "kickstart", "-k", "gui/501/ai.hermes.gateway"],
+        ["launchctl", "enable", "gui/501/com.example.unrelated"],
+        ["sudo", "launchctl", "remove", "ai.hermes.gateway"],
+        ["bash", "-c", "launchctl bootout gui/501/ai.hermes.gateway"],
+        ["bash", "-c", r"launchctl boot\out gui/501/ai.hermes.gateway"],
+        "launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist",
+    ],
+)
+def test_subprocess_run_launchctl_mutation_blocked(cmd):
+    """launchd has no per-test domain: a test run once left three ``ai.hermes.gateway-<hash>``
+    LaunchAgents running real gateways from pytest temp homes. Any label, any spelling."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(cmd, shell=isinstance(cmd, str), env=_NO_LAUNCHCTL, check=False)
+
+
+def test_subprocess_popen_launchctl_submit_blocked():
+    """The deferred plist reload hands its bootout/bootstrap to a ``launchctl submit`` job."""
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.Popen(["launchctl", "submit", "-l", "ai.hermes.gateway.reload.1", "--", "true"], env=_NO_LAUNCHCTL)
+
+
+def test_a_fake_launchctl_on_path_still_runs(tmp_path):
+    """Tests that put their own ``launchctl`` first on PATH (real fd inheritance) are not launchd."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "launchctl"
+    fake.write_text(f'#!/bin/sh\necho "$@" > {tmp_path / "called"}\n', encoding="utf-8")
+    fake.chmod(0o755)
+    subprocess.run(["launchctl", "bootout", "gui/501/ai.hermes.gateway"], env={"PATH": str(bin_dir)}, check=True)
+    assert (tmp_path / "called").read_text(encoding="utf-8") == "bootout gui/501/ai.hermes.gateway\n"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["launchctl", "list"],
+        ["launchctl", "list", "ai.hermes.gateway"],
+        ["launchctl", "print", "gui/501/ai.hermes.gateway"],
+        ["launchctl", "managername"],
+        ["grep", "launchctl-bootout", "/tmp/notes.txt"],
+    ],
+)
+def test_subprocess_run_launchctl_read_passes_guard(cmd):
+    """Reads reach the real ``subprocess.run``; the empty PATH makes that FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(cmd, env=_NO_LAUNCHCTL, check=False)
+
+
 def test_host_gateway_start_blocked_but_container_exec_allowed():
     """A host-side ``hermes gateway start`` spawns a real runtime; the same words addressed to
     a container via ``docker exec`` stay inside it and are the Docker harness's business."""

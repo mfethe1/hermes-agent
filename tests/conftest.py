@@ -1486,6 +1486,21 @@ _REAL_INSTALLED_GUI_APPS = sorted({
     for form in (os.path.abspath(app), os.path.realpath(app))})
 
 
+def _capture_real_launch_agents() -> list[str]:
+    """The account's LaunchAgents dir, resolved like ``get_launchd_plist_path`` (passwd, never HOME).
+    A plist written there runs at the next login (RunAtLoad) whether or not a test loaded it:
+    three pytest temp-home gateways ran from there for days. macOS only; reads stay allowed."""
+    if sys.platform != "darwin":
+        return []
+    import pwd
+
+    agents = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library", "LaunchAgents")
+    return sorted({os.path.normcase(form) for form in (os.path.abspath(agents), os.path.realpath(agents))})
+
+
+_REAL_LAUNCH_AGENTS = _capture_real_launch_agents()
+
+
 @pytest.fixture(autouse=True)
 def _forbid_real_user_path_writes(monkeypatch):
     """Fail a test that would add an entry to the real Windows User PATH.
@@ -1515,7 +1530,8 @@ def _forbid_real_hermes_home_io(monkeypatch, request):
         return
     from tests.home_io_guard import HomeIOGuard
 
-    HomeIOGuard(lambda: _REAL_HERMES_ROOT_CANDIDATES, lambda: _REAL_INSTALLED_GUI_APPS).install(monkeypatch)
+    HomeIOGuard(lambda: _REAL_HERMES_ROOT_CANDIDATES, lambda: _REAL_INSTALLED_GUI_APPS,
+                lambda: _REAL_LAUNCH_AGENTS).install(monkeypatch)
 
 
 @pytest.fixture

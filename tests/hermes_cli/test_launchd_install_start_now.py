@@ -4,6 +4,7 @@ The plist carries RunAtLoad, so loading it (`launchctl bootstrap`) starts the ga
 no-start install must therefore write the plist without loading it; `hermes gateway start` loads it later.
 """
 import argparse
+import os
 import plistlib
 import subprocess
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ from hermes_cli.subcommands.gateway import build_gateway_parser
 
 LABEL = "ai.hermes.gateway"
 DOMAIN = "gui/501"
+# The real resolvers, captured before the fixture below replaces them.
+ACCOUNT_PLIST_PATH, ACCOUNT_LABEL = gateway_cli.get_launchd_plist_path, gateway_cli.get_launchd_label
 
 
 def _parse(*argv):
@@ -98,3 +101,27 @@ def test_wizard_no_to_start_now_installs_without_loading(launchd, monkeypatch):
     assert launchd.plist.exists()
     assert launchd.bootstraps == []
     assert launchd.starts == []
+
+
+def test_install_that_bypasses_the_plist_path_seam_cannot_write_the_account_launch_agents(
+    launchd, tmp_path, monkeypatch,
+):
+    """How this file once leaked: with the temp-home write guard off, an install that resolved the
+    REAL plist path wrote ``ai.hermes.gateway-<hash>.plist`` (RunAtLoad) into the account's
+    LaunchAgents, and launchd ran its pytest home's gateway at every login after."""
+    import pwd
+
+    from tests import conftest
+
+    account = tmp_path / "account"
+    agents = account / "Library" / "LaunchAgents"
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(account)))
+    monkeypatch.setattr(conftest, "_REAL_LAUNCH_AGENTS", [os.path.normcase(os.path.realpath(agents))])
+    monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", ACCOUNT_PLIST_PATH)
+    monkeypatch.setattr(gateway_cli, "get_launchd_label", ACCOUNT_LABEL)
+
+    with pytest.raises(pytest.fail.Exception, match="REAL account LaunchAgents"):
+        gateway_cli.gateway_command(_parse("install", "--no-start-now"))
+
+    assert not agents.is_dir() or not any(agents.iterdir())
+    assert launchd.launchctl == [] and launchd.bootstraps == []
