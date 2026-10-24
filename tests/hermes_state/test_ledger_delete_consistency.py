@@ -162,7 +162,7 @@ def test_startup_repair_latches_after_a_refusal_and_warns_once(monkeypatch, capl
     refusals = [r for r in caplog.records if 'Ghost session prune skipped' in r.getMessage()]
     assert [r.levelno for r in refusals] == [logging.WARNING], 'refusal logged once, at warning'
     assert session_db.prune_empty_ghost_sessions.call_count == 1, 'latched after the refusal'
-    assert meta.get('ghost_session_prune_v2')
+    assert meta.get('ghost_session_prune_v1')
 
 
 def _local_session(db, epoch):

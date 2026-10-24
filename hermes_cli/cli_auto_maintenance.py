@@ -26,10 +26,9 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         # One-time repairs, each latched in state_meta once it has run.
         for meta_key, repair, done_msg, skip_msg in (
             (
-                # v2: also prunes empty cron sessions; stores that latched the TUI-only v1 run it once more.
-                "ghost_session_prune_v2",
+                "ghost_session_prune_v1",
                 lambda: session_db.prune_empty_ghost_sessions(sessions_dir=_hermes_home_maint / "sessions"),
-                "Pruned %d empty ghost sessions (TUI, cron)", "Ghost session prune skipped: %s",
+                "Pruned %d empty TUI ghost sessions", "Ghost session prune skipped: %s",
             ),
             (
                 "orphaned_compression_finalize_v1",

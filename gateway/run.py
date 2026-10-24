@@ -4409,8 +4409,9 @@ def _profile_sessions_dir(launch: Optional[tuple[Path, Path]]) -> Path:
 
 def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = None) -> None:
     """Stale-session auto-archive plus auto-prune/VACUUM for ONE profile's state.db; both are gated
-    by sessions.min_interval_hours (VACUUM additionally by its own throttles). Opens its own
-    SessionDB — SQLite connections are thread-bound.
+    by sessions.min_interval_hours (VACUUM additionally by its own throttles). Then the empty cron
+    session prune, which no ``sessions:`` setting gates. Opens its own SessionDB — SQLite
+    connections are thread-bound.
 
     Profile-scoped by its caller: ``acquire()``, ``get_hermes_home()`` and ``load_config()`` all
     resolve through the active scope, so an unscoped run swept only the LAUNCH profile's store with
@@ -4421,8 +4422,6 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     from hermes_cli.config import load_config as _load_full_config
     from hermes_state_registry import acquire, release_or_close
     _sess_cfg = (_load_full_config().get("sessions") or {})
-    if not (_sess_cfg.get("auto_archive", False) or _sess_cfg.get("auto_prune", False)):
-        return
     _adb = acquire()
     try:
         if _sess_cfg.get("auto_archive", False):
@@ -4436,6 +4435,12 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
                 min_vacuum_interval_days=int(_sess_cfg.get("min_vacuum_interval_days", 30)),
                 vacuum=bool(_sess_cfg.get("vacuum_after_prune", True)),
                 sessions_dir=_profile_sessions_dir(launch))
+        # Ghost cleanup, not retention: a gated cron fire's empty, untitled session holds nothing to
+        # keep (ST-7). Here because the gateway is the store's single writer; the classic CLI's
+        # one-time startup repairs never run in production. Last, so a refusal costs only itself.
+        _pruned = _adb.prune_empty_cron_sessions(sessions_dir=_profile_sessions_dir(launch))
+        if _pruned:
+            logger.info("Pruned %d empty cron sessions", _pruned)
     finally:
         release_or_close(_adb)
 

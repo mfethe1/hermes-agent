@@ -111,10 +111,8 @@ class SessionMaintenanceMixin:
     """Retention pruning, stale-session archiving and VACUUM policy for SessionDB."""
 
     def prune_empty_ghost_sessions(self, sessions_dir: Optional[Path] = None) -> int:
-        """Remove empty ghost sessions (no messages, no title): ended TUI rows >24hr old, and cron rows
-        >1hr old, ended or not, that no live turn lease guards. A canonical cron fire creates its session
-        before the run's gates, and a gated fire used to leave it open and empty forever (ST-7)."""
-        now = time.time()
+        """Remove empty TUI ghost sessions (no messages, no title, >24hr old)."""
+        cutoff = time.time() - 86400
         def _do(conn):
             ids = [r[0] for r in conn.execute("""
                 SELECT id FROM sessions
@@ -125,20 +123,50 @@ class SessionMaintenanceMixin:
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )
-            """, (now - 86400,)).fetchall()]
-            cron_ids = [r[0] for r in conn.execute("""
+            """, (cutoff,)).fetchall()]
+            from hermes_state_mutation_retirement import retire_prunable
+            ids = retire_prunable(conn, ids)
+            for chunk in _id_chunks(ids):
+                conn.execute(f"DELETE FROM sessions WHERE id IN ({_placeholders(chunk)})", chunk)
+            if ids:
+                self._delete_unreferenced_system_prompts(conn)
+            return ids
+        removed_ids = self._execute_write(_do) or []
+        emit_session_deleted(self, removed_ids, reason="ghost_prune", sessions_dir=sessions_dir)
+        from hermes_state_media import collect_retired_media
+        collect_retired_media(self)
+        for sid in removed_ids if sessions_dir else ():
+            self._remove_session_files(sessions_dir, sid)
+        return len(removed_ids)
+
+    def prune_empty_cron_sessions(self, sessions_dir: Optional[Path] = None) -> int:
+        """Remove empty cron sessions (no messages, no title, >1hr old, ended or not) that no live turn
+        lease guards; ``retire_prunable`` spares queued/started admissions. A canonical cron fire creates
+        its session before the run's gates, and a gated fire used to leave it open and empty forever
+        (ST-7). Roots without a continuation only: a compressed run's earlier segments are just as
+        empty, but they are its lineage, and a child's foreign key fails the whole DELETE.
+
+        The gateway runs this on every state.db maintenance tick, so like a prune pass it also
+        reclaims the deletion tombstones past the retry horizon; each pruned fire leaves some."""
+        cutoff = time.time() - 3600
+        def _do(conn):
+            ids = [r[0] for r in conn.execute("""
                 SELECT id FROM sessions
                 WHERE source = 'cron'
                   AND title IS NULL
+                  AND parent_session_id IS NULL
                   AND started_at < ?
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )
-            """, (now - 3600,)).fetchall()]
-            guarded = self._guarded_ids(conn, cron_ids)
-            ids += [sid for sid in cron_ids if sid not in guarded]
-            from hermes_state_mutation_retirement import retire_prunable
-            ids = retire_prunable(conn, ids)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions child WHERE child.parent_session_id = sessions.id
+                  )
+            """, (cutoff,)).fetchall()]
+            guarded = self._guarded_ids(conn, ids)
+            from hermes_state_mutation_retirement import prune_retired_tombstones, retire_prunable
+            ids = retire_prunable(conn, [sid for sid in ids if sid not in guarded])
+            prune_retired_tombstones(conn)
             for chunk in _id_chunks(ids):
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({_placeholders(chunk)})", chunk)
             if ids:
