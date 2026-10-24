@@ -223,18 +223,28 @@ def test_subprocess_run_setsid_systemctl_blocked():
 
 # ──────────────────── launchctl (macOS launchd) ─────────────────
 #
-# Every call here runs with an empty PATH and no absolute launchctl path: without the guard it
-# must fail with FileNotFoundError, never reach the real launchd domain. A red run of an earlier
-# draft that called /bin/launchctl directly booted the developer's live gateway job out.
+# Every call here runs over a spawn recorder (tests/_fixtures/spawn_recorder.py) patched beneath
+# the guard: whether or not the guard catches it, nothing reaches the real launchd domain. An
+# earlier draft relied on PATH alone, and its ``/bin/launchctl bootout`` case, run before the guard
+# existed, booted the developer's live gateway job out.
 
-_NO_LAUNCHCTL = {"PATH": "/nonexistent"}
+
+@pytest.fixture
+def spawned(monkeypatch):
+    from tests._fixtures.spawn_recorder import record_spawns
+
+    return record_spawns(monkeypatch)
+
+
+# The system PATH: a launchctl shim earlier on the developer's PATH is a fake the guard lets through.
+_SYSTEM_PATH = {"PATH": "/usr/bin:/bin"}
 
 
 @pytest.mark.parametrize(
     "cmd",
     [
         ["launchctl", "bootstrap", "gui/501", "/tmp/ai.hermes.gateway-2df93972.plist"],
-        ["/nonexistent/launchctl", "bootout", "gui/501/ai.hermes.gateway"],
+        ["/bin/launchctl", "bootout", "gui/501/ai.hermes.gateway"],
         ["launchctl", "load", "-w", "/tmp/ai.hermes.gateway.plist"],
         ["launchctl", "kickstart", "-k", "gui/501/ai.hermes.gateway"],
         ["launchctl", "enable", "gui/501/com.example.unrelated"],
@@ -244,28 +254,32 @@ _NO_LAUNCHCTL = {"PATH": "/nonexistent"}
         "launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist",
     ],
 )
-def test_subprocess_run_launchctl_mutation_blocked(cmd):
+def test_subprocess_run_launchctl_mutation_blocked(cmd, spawned):
     """launchd has no per-test domain: a test run once left three ``ai.hermes.gateway-<hash>``
     LaunchAgents running real gateways from pytest temp homes. Any label, any spelling."""
     with pytest.raises(RuntimeError, match="live-system guard"):
-        subprocess.run(cmd, shell=isinstance(cmd, str), env=_NO_LAUNCHCTL, check=False)
+        subprocess.run(cmd, shell=isinstance(cmd, str), env=_SYSTEM_PATH, check=False)
+    assert spawned == []
 
 
-def test_subprocess_popen_launchctl_submit_blocked():
+def test_subprocess_popen_launchctl_submit_blocked(spawned):
     """The deferred plist reload hands its bootout/bootstrap to a ``launchctl submit`` job."""
     with pytest.raises(RuntimeError, match="live-system guard"):
-        subprocess.Popen(["launchctl", "submit", "-l", "ai.hermes.gateway.reload.1", "--", "true"], env=_NO_LAUNCHCTL)
+        subprocess.Popen(["launchctl", "submit", "-l", "ai.hermes.gateway.reload.1", "--", "true"], env=_SYSTEM_PATH)
+    assert spawned == []
 
 
-def test_a_fake_launchctl_on_path_still_runs(tmp_path):
+def test_a_fake_launchctl_on_path_passes_the_guard(tmp_path, spawned):
     """Tests that put their own ``launchctl`` first on PATH (real fd inheritance) are not launchd."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "launchctl"
-    fake.write_text(f'#!/bin/sh\necho "$@" > {tmp_path / "called"}\n', encoding="utf-8")
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
     fake.chmod(0o755)
-    subprocess.run(["launchctl", "bootout", "gui/501/ai.hermes.gateway"], env={"PATH": str(bin_dir)}, check=True)
-    assert (tmp_path / "called").read_text(encoding="utf-8") == "bootout gui/501/ai.hermes.gateway\n"
+    cmd = ["launchctl", "bootout", "gui/501/ai.hermes.gateway"]
+    with pytest.raises(FileNotFoundError, match="spawn recorded"):
+        subprocess.run(cmd, env={"PATH": str(bin_dir)}, check=False)
+    assert spawned == [cmd]
 
 
 @pytest.mark.parametrize(
@@ -278,10 +292,11 @@ def test_a_fake_launchctl_on_path_still_runs(tmp_path):
         ["grep", "launchctl-bootout", "/tmp/notes.txt"],
     ],
 )
-def test_subprocess_run_launchctl_read_passes_guard(cmd):
-    """Reads reach the real ``subprocess.run``; the empty PATH makes that FileNotFoundError."""
-    with pytest.raises(FileNotFoundError):
-        subprocess.run(cmd, env=_NO_LAUNCHCTL, check=False)
+def test_subprocess_run_launchctl_read_passes_guard(cmd, spawned):
+    """Reads reach the spawn (the recorder, here) untouched."""
+    with pytest.raises(FileNotFoundError, match="spawn recorded"):
+        subprocess.run(cmd, check=False)
+    assert spawned == [cmd]
 
 
 def test_host_gateway_start_blocked_but_container_exec_allowed():
