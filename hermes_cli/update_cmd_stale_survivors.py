@@ -25,13 +25,14 @@ def stale_fleet_survivor_pids(fleet: list, already_signalled: set) -> list[int]:
     return pids
 
 
-def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> list[int]:
+def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float, plan=None) -> list[int]:
     """Drain-first restart every proven-stale gateway; returns the PIDs signalled.
 
     Bookkeeping lands in ``restart.killed_pids`` so the receipt and the survivor sweep see them.
-    Never raises: verification must still finalize the receipt (with an owed restart).
+    *plan*: the pre-update inventory, whose supervisor verdicts predate the pause. Never raises:
+    verification must still finalize the receipt (with an owed restart).
     """
-    from hermes_cli.update_cmd_fleet import _drain_or_signal_gateway_for_update
+    from hermes_cli.update_cmd_fleet import _FRESH_RESTART_SUPERVISORS, _drain_or_signal_gateway_for_update
     from hermes_cli.update_inventory import _detect_supervisor_for_pid
 
     pids = stale_fleet_survivor_pids(fleet, set(restart.killed_pids))
@@ -43,6 +44,9 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     except Exception:
         service_pids = set()
     labels = {row.get("pid"): str(row.get("profile") or "gateway") for row in fleet if isinstance(row, dict)}
+    # Classified before the pause, while ancestry still tied each gateway to its job: the pause's
+    # bootout ends a launchd job's front at once, and a gateway that outlives it is init's child here.
+    planned = {r.pid: r.supervisor for r in getattr(plan, "runtimes", None) or [] if getattr(r, "kind", None) == "gateway"}
     print()
     print(f"  ⚠ {len(pids)} gateway process(es) still run the pre-update code — requesting a restart")
     signalled: list[int] = []
@@ -50,7 +54,8 @@ def signal_stale_fleet_survivors(fleet: list, restart, drain_budget: float) -> l
     for pid in pids:
         label = f"{labels.get(pid, 'gateway')} (PID {pid})"
         # Before the signal: a drained gateway is gone, and its ancestry with it.
-        unsupervised = _detect_supervisor_for_pid(pid, service_pids) == "manual"
+        unsupervised = (planned.get(pid) not in _FRESH_RESTART_SUPERVISORS
+                        and _detect_supervisor_for_pid(pid, service_pids) == "manual")
         try:
             if _drain_or_signal_gateway_for_update(pid, drain_budget, label):
                 signalled.append(pid)

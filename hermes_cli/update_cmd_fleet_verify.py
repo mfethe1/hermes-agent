@@ -320,7 +320,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
             # A proven-stale survivor must not keep running (its ticker yields every tick and
             # nothing else restarts it, #117275): hand it to the drain-first restart path.
             from hermes_cli.update_cmd_stale_survivors import signal_stale_fleet_survivors
-            signal_stale_fleet_survivors(_fleet_snapshot, restart, fleet._gateway_drain_budget())
+            signal_stale_fleet_survivors(_fleet_snapshot, restart, fleet._gateway_drain_budget(), _pre_update_plan)
         elif not _fleet_snapshot and _fleet_rows_expected:
             # collect_fleet_versions() swallows every failure, so zero rows with
             # expected runtimes is indistinguishable from health — keep the restart owed.

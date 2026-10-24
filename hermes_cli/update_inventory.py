@@ -67,7 +67,7 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
         # instead of killing the child, so reconciliation must plan it under its own mechanism id.
         # See #91277.
         return "windows-service"
-    if pid not in service_pids and not _below_service_pid(pid, service_pids):
+    if pid not in service_pids and not _below_service_pid(pid, service_pids) and not _launched_by_loaded_launchd_job(pid):
         return "manual"
     with suppress(Exception):
         from hermes_cli.gateway import is_macos, supports_systemd_services
@@ -88,6 +88,26 @@ def _below_service_pid(pid: int, service_pids: set) -> bool:
     from hermes_cli.dashboard_procs import _process_ancestors
 
     return not set(service_pids).isdisjoint(_process_ancestors(pid))
+
+
+def _launched_by_loaded_launchd_job(pid: int) -> bool:
+    """Did a still-loaded ``ai.hermes.gateway*`` launchd job launch *pid*? A bootout or SIGTERM ends
+    the ``osascript`` front at once and init adopts a gateway still draining or wedged (the 10-24 one
+    outlived its front by ~8 minutes): no ancestry walk ties it to the job again, but its exec-time
+    environment still names the job (``launchd_job_label``, the seam the gateway declares its own
+    supervisor through). The loaded job's KeepAlive starts the home's next gateway once it exits."""
+    if sys.platform != "darwin":
+        return False
+    with suppress(Exception):
+        from gateway.restart import launchd_job_label
+        from hermes_cli.dashboard_procs import _pid_environ
+        from hermes_cli.gateway import _locate_launchd_gateway_service
+
+        # ``or {}``: an unreadable environment is no evidence; None would read the updater's own.
+        label = launchd_job_label(_pid_environ(pid) or {})
+        return bool(label and label.startswith("ai.hermes.gateway")
+                    and _locate_launchd_gateway_service(label)[0] is not None)
+    return False
 
 
 # THE restart policy table: restart execution consumes these ids via match_runtime_outcomes / the

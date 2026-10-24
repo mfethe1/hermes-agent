@@ -109,8 +109,10 @@ def test_verify_fleet_hands_stale_rows_to_survivor_signalling(monkeypatch):
     import hermes_cli.update_cmd_stale_survivors as surv
     from hermes_cli import update_cmd
     from hermes_cli.update_cmd_fleet import _GatewayRestartOutcome
+    from hermes_cli.update_inventory import UpdatePlan
 
     stale_fleet = [{"profile": "default", "pid": 4242, "state": "stale", "code_sha": "a" * 40}]
+    plan = UpdatePlan()
     seen = {}
     monkeypatch.setattr(fleet_verify, "_print_legacy_units_warning", lambda: None)
     monkeypatch.setattr(update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None)
@@ -119,15 +121,17 @@ def test_verify_fleet_hands_stale_rows_to_survivor_signalling(monkeypatch):
     monkeypatch.setattr(update_cmd, "_surviving_pre_update_serve_runtimes", lambda plan: [])
     monkeypatch.setattr(fleet_verify, "_collect_fleet_snapshot", lambda restart, expected: stale_fleet)
     monkeypatch.setattr(surv, "signal_stale_fleet_survivors",
-                        lambda fleet, restart, budget: seen.setdefault("fleet", fleet) and [])
+                        lambda fleet, restart, budget, plan: seen.update(fleet=fleet, plan=plan) or [])
     restart = _GatewayRestartOutcome(
         incomplete=False, phase_errors=[], pre_restart_gateway_pids=[4242], restarted_services=[],
         failed_or_stale_units=[], relaunched_profiles=[], externally_supervised_profiles=[], killed_pids=set(),
     )
     with contextlib.redirect_stdout(io.StringIO()):
         fleet_verify._verify_fleet_after_update(
-            restart, _pre_update_plan=None, _windows_gateway_resume=None, update_complete=True,
+            restart, _pre_update_plan=plan, _windows_gateway_resume=None, update_complete=True,
         )
     # Contract C3: was SystemExit(1); now flagged incomplete (owed restart, marker kept).
     assert restart.incomplete
     assert seen["fleet"] == stale_fleet
+    # Its supervisor verdicts predate the pause, which may have orphaned a launchd gateway.
+    assert seen["plan"] is plan
