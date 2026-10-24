@@ -412,13 +412,14 @@ def _complete_selected(request: dict) -> bool:
             pre_update_version=request["pre_update_version"],
             completion_message=request.get("completion_message"),
             announce=None if request.get("completion_message") else "\n✓ Code updated!",
-            followups=followups, before_build=lambda: _resume_paused_before_build(request))
+            followups=followups)
     except (Exception, SystemExit) as exc:  # health: allow BLE001 -- e.g. the shared update lock refused the tail
         reason = str(exc) or type(exc).__name__
         # The tail's steps catch their own failures, so a raise here means the build never ran.
         _report_desktop_build_owed(request, None, "the source-update tail did not run")
         record_followup("completion", reason)
         followups.append(("completion", reason))
+    _resume_paused_after_tail(request)
     tail_owed = any(step in TAIL_FOLLOWUPS for step, _ in followups)
     record_build_stage(followups)
     if not tail_owed:
@@ -454,10 +455,11 @@ def _complete_selected(request: dict) -> bool:
     return complete
 
 
-def _resume_paused_before_build(request: dict) -> None:
-    """Restart the gateways the POSIX pause stopped: the dependencies are synced and the launchers
-    published, the product builds (minutes) have not started. A gateway needs nothing later to
-    boot. A failure stays owed: the post-build resume retries it and records the outcome.
+def _resume_paused_after_tail(request: dict) -> None:
+    """Restart the gateways the POSIX pause stopped once the tail (launchers, product builds,
+    post-update maintenance) is done, or never ran: a gateway started inside it boots on a half-built
+    install (2026-10-24: "install out of sync" mid-build, the config migration still to come). A
+    failure stays owed: the resume after the fleet restart retries it and records the outcome.
 
     POSIX only: the fleet restart skips what this restarted (``already_restarted``). A Windows set
     keeps resuming after the fleet restart, which would otherwise drain it a second time."""
@@ -467,8 +469,8 @@ def _resume_paused_before_build(request: dict) -> None:
     from hermes_cli.update_cmd import _m
     try:
         _m()._resume_windows_gateways_after_update(token)
-    except Exception as exc:  # health: allow BLE001 -- retried (and recorded) after the build
-        print(f"  ⚠ Paused gateway restart incomplete ({exc}); retrying after the build")
+    except Exception as exc:  # health: allow BLE001 -- retried (and recorded) after the fleet restart
+        print(f"  ⚠ Paused gateway restart incomplete ({exc}); retrying after the fleet restart")
 
 
 class _ForwardedOutput:

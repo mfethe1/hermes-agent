@@ -4,9 +4,10 @@ Windows pauses its gateways before the fetch (``update_cmd_windows``) because th
 files. On POSIX nothing is locked, but a gateway that keeps running while git rewrites the tree
 loads new-tree modules into an old process on its next lazy import. So every gateway running
 from this install is stopped at the commit point, immediately before the first checkout move
-(``update_cmd_commit.arm_commit_point``), and the same set is restarted once the dependencies
-are synced and the launchers published, before the product builds
-(``source_completion.complete_source_checkout``'s ``before_build``).
+(``update_cmd_commit.arm_commit_point``), and the same set is restarted once the update's tail
+(dependencies, launchers, product builds, post-update maintenance) is done
+(``update_completion._resume_paused_after_tail``): a gateway started inside it boots on a
+half-built install.
 
 The set rides the Windows pause contract: one token in ``update_pause_record`` (identity = pid
 + start time; supervisor unit, or argv + home for bare processes), written before the first stop,
@@ -622,14 +623,14 @@ def _pause(token: dict) -> str | None:
         print(f"  ⚠ Could not pause every gateway ({exc}); restarting them, the update continues without the pause")
         try:
             resume_paused_set(token)
-        except Exception as again:  # health: allow BLE001 -- still owed: completion restarts them after the deps
-            print(f"  ⚠ {again}; they restart once the dependencies are synced")
+        except Exception as again:  # health: allow BLE001 -- still owed: completion restarts them after the tail
+            print(f"  ⚠ {again}; they restart once the update is built")
         for restarted in _RESTARTED.values():
             restarted.clear()  # back on the OLD code: the post-commit fleet restart must refresh them
         pause_record.sync(token)
         return None
     pause_record.sync(token)
-    print(f"  ⏸ Paused for the update: {_describe(token)} (restarted once the dependencies are synced)")
+    print(f"  ⏸ Paused for the update: {_describe(token)} (restarted once the update is built)")
     return None
 
 

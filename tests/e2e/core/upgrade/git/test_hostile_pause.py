@@ -9,7 +9,7 @@ and the durable pause record ``update_pause_record`` keeps in the root hermes ho
 
 (a) a real release: the gateway is gone BEFORE HEAD moves (a 0.1 s timeline of both), and exactly
     one gateway, a new process, serves the new commit once the update returns; the restart line is
-    printed after the dependency sync and before the product builds.
+    printed after the product builds (a gateway started during them booted on a half-built install).
 (b) no-op update (already current): the same gateway process keeps serving; nothing is stopped.
 (c) the fetch fails (origin unreachable): nothing is stopped.
 (d) ``--no-gateway-restart``: nothing is stopped before the move (the user manages gateways).
@@ -277,7 +277,7 @@ def _diag(w: G.World, host: NamespaceHost, cp=None, **extra) -> str:
 # -- cells -----------------------------------------------------------------------------------------
 
 
-def test_real_release_pauses_before_the_move_and_restarts_after_deps(w):
+def test_real_release_pauses_before_the_move_and_restarts_after_the_build(w):
     w.reset_clean()
     with _namespace(w) as host:
         # A second profile: the one multiplexing gateway serves both and is paused/restarted once.
@@ -303,8 +303,8 @@ def test_real_release_pauses_before_the_move_and_restarts_after_deps(w):
         assert PAUSED in out and RESTARTED in out, f"the pause/restart lines are missing:\n{diag}"
         assert out.index(PAUSED) < out.index(RESTARTED), f"restart printed before the pause:\n{diag}"
         built = [m.start() for m in re.finditer(r"web UI|Building", out)]
-        assert not built or out.index(RESTARTED) < built[0], \
-            f"the paused gateway was restarted only after the product builds:\n{diag}"
+        assert not built or out.index(RESTARTED) > built[-1], \
+            f"the paused gateway was restarted before the product builds finished:\n{diag}"
         assert after and int(after["pid"]) != old_pid, f"no NEW gateway process serves {target[:12]}:\n{diag}"
         assert len(gws) == 1, f"expected exactly one gateway process, found {len(gws)}:\n{diag}"
         paused_line = next(line for line in out.splitlines() if PAUSED in line)
