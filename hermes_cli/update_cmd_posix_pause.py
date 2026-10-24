@@ -148,7 +148,9 @@ def _discover_systemd() -> list[dict]:
 
 
 def _discover_launchd() -> list[dict]:
-    """Loaded ``ai.hermes.gateway*`` jobs of this install with a live process (macOS)."""
+    """Loaded ``ai.hermes.gateway*`` jobs of this install with a live process (macOS). ``pid`` is the
+    gateway serving the job's home, the process the pause marks, drains and waits for; ``job_pid`` is
+    launchd's job process, the ``osascript`` front (#71206) two levels above it."""
     if sys.platform != "darwin":
         return []
     from hermes_cli.gateway import (
@@ -165,8 +167,10 @@ def _discover_launchd() -> list[dict]:
         if domain is None or not pid or pid <= 0:
             continue
         plist = get_launchd_plist_path().with_name(f"{label}.plist")
-        jobs.append({"kind": "launchd", "label": label, "domain": domain, "plist": str(plist), "pid": int(pid),
-                     "home": _home_of(int(pid))})
+        home = _home_of(int(pid))
+        gateway = _gateway_on_home(home, set()) if home else None
+        jobs.append({"kind": "launchd", "label": label, "domain": domain, "plist": str(plist),
+                     "pid": gateway or int(pid), "job_pid": int(pid), "home": home})
     return jobs
 
 
@@ -302,7 +306,7 @@ def _left_running(units: list[dict], jobs: list[dict]) -> tuple[list[dict], list
             notices.append(f"  ↷ {unit['unit']} keeps running until after the update (this update could "
                            "not prove it runs outside that unit's cgroup)")
     for job in jobs:
-        if (_is_pid_ancestor_of_current_process(job["pid"])
+        if (_is_pid_ancestor_of_current_process(job.get("job_pid", job["pid"]))
                 or os.environ.get("XPC_SERVICE_NAME") == job["label"]):
             notices.append(f"  ↷ {job['label']} keeps running until after the update (this update runs "
                            "inside its launchd job)")
@@ -352,8 +356,9 @@ def _start_unit(unit: dict) -> int:
 
 
 def _stop_job(job: dict, *, drained: bool = False) -> None:
-    """Boot *job* out of launchd. *drained*: its gateway already exited through the drain; the
-    bootout only keeps KeepAlive from serving the update."""
+    """Boot *job* out of launchd and wait for its gateway to exit, not just the job process: the
+    bootout ends the ``osascript`` front at once while the gateway drains on. *drained*: the gateway
+    already exited through the drain; the bootout only keeps KeepAlive from serving the update."""
     from hermes_cli.gateway import _locate_launchd_gateway_service
     from hermes_cli.update_cmd_windows import _write_update_planned_stop_marker
     if not drained and job.get("home"):
@@ -361,10 +366,12 @@ def _stop_job(job: dict, *, drained: bool = False) -> None:
     result = subprocess.run(["launchctl", "bootout", f"{job['domain']}/{job['label']}"],
                             capture_output=True, text=True, encoding="utf-8", errors="replace",
                    stdin=subprocess.DEVNULL, timeout=90, check=False)
-    _wait_gone([job["pid"]], 30.0)
+    _wait_gone([job.get("job_pid", job["pid"])], 30.0)
     # KeepAlive may have respawned the drained gateway already: the job, not the old PID, decides.
     if result.returncode != 0 and (_locate_launchd_gateway_service(job["label"])[1] or 0) > 0:
         raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}")
+    if _wait_gone([job["pid"]], _STOP_TIMEOUT_S, {job["pid"]: job.get("ct")}):
+        raise PauseRefused(f"gateway PID {job['pid']} of {job['label']} still runs after launchctl bootout")
 
 
 def _start_job(job: dict) -> None:
@@ -378,7 +385,8 @@ def _start_job(job: dict) -> None:
     subprocess.run(["launchctl", "kickstart", f"{job['domain']}/{job['label']}"],
                    capture_output=True, text=True, encoding="utf-8", errors="replace",
                    stdin=subprocess.DEVNULL, timeout=30, check=False)
-    if not _wait_for_launchd_service_pid(job["label"], old_pid=job["pid"], timeout=15.0, domain=job["domain"]):
+    if not _wait_for_launchd_service_pid(job["label"], old_pid=job.get("job_pid", job["pid"]), timeout=15.0,
+                                         domain=job["domain"]):
         raise RuntimeError(f"{job['label']} did not come back under launchd")
 
 

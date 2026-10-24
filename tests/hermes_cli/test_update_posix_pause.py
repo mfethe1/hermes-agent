@@ -6,6 +6,7 @@ Real processes and a real record; the live stop/restart of real gateways is prov
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import plistlib
@@ -18,6 +19,7 @@ import time
 import pytest
 
 from tests.hermes_cli.test_update_pause_record import _child, _reap_children
+from tests.waiting import wait_until
 
 _UNIT = {"kind": "systemd", "scope": "user", "unit": "hermes-gateway-p2probe.service", "pid": 4242}
 
@@ -217,3 +219,83 @@ def test_a_launchd_job_is_paused_through_launchd_and_restarted_through_it(tmp_pa
         assert pid() and pid() != first, "the restart did not bring the job back under launchd"
     finally:
         subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
+
+
+@pytest.mark.platforms("macos")
+def test_a_launchd_entry_targets_the_gateway_behind_its_job(tmp_path, monkeypatch):
+    """launchd's job PID is the ``osascript`` front; the gateway serving the job's home is its
+    grandchild. The pause marks, drains and waits for that gateway (2026-10-24: it marked and waited
+    for the job PID, and the gateway outlived the "pause")."""
+    from hermes_cli import gateway, update_cmd_posix_pause, update_fleet_scope
+    import gateway.status as gateway_status
+
+    job_pid, gateway_pid = 33058, 33066
+    monkeypatch.setattr(gateway, "launchd_gateway_labels_for_install", lambda: ["ai.hermes.gateway"])
+    monkeypatch.setattr(gateway, "legacy_launchd_labels_for_install", lambda exclude=(): [])
+    monkeypatch.setattr(gateway, "_locate_launchd_gateway_service", lambda label: ("gui/501", job_pid))
+    monkeypatch.setattr(gateway, "get_launchd_plist_path", lambda: tmp_path / "ai.hermes.gateway.plist")
+    monkeypatch.setattr(update_fleet_scope, "launchd_label_foreign_home", lambda label: None)
+    monkeypatch.setattr(update_cmd_posix_pause, "_home_of", lambda pid: str(tmp_path) if pid == job_pid else None)
+    monkeypatch.setattr(gateway_status, "live_gateway_pid_for_home",
+                        lambda home: gateway_pid if home == tmp_path else None)
+
+    [job] = update_cmd_posix_pause._discover_launchd()
+    assert (job["pid"], job["job_pid"], job["home"]) == (gateway_pid, job_pid, str(tmp_path))
+
+
+def _launchd_job_tree(tmp_path, drain_s):
+    """``(job, gateway_pid)``: a job process (the osascript front) whose grandchild, under a wrapper,
+    is the gateway. A SIGTERM ends the job and wrapper at once; the gateway drains for *drain_s*
+    seconds first (``None``: only the ``stop`` file the test leaves behind ends it, since an
+    orphaned gateway is outside the test's process tree)."""
+    pid_file, stop = tmp_path / "gateway.pid", tmp_path / "stop"
+    on_term = "lambda *_: None" if drain_s is None else f"lambda *_: (time.sleep({drain_s}), sys.exit(0))"
+    gateway = ("import os, signal, sys, time\n"
+               f"signal.signal(signal.SIGTERM, {on_term})\n"
+               f"open({str(pid_file)!r} + '.tmp', 'w').write(str(os.getpid()))\n"
+               f"os.replace({str(pid_file)!r} + '.tmp', {str(pid_file)!r})\n"
+               f"while not os.path.exists({str(stop)!r}): time.sleep(0.2)\n")
+    wrapper = f"import subprocess, sys; subprocess.run([sys.executable, '-c', {gateway!r}])"
+    job = subprocess.Popen([sys.executable, "-c", f"import subprocess, sys; subprocess.run([sys.executable, '-c', {wrapper!r}])"],
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+    return job, wait_until(lambda: pid_file.exists() and int(pid_file.read_text()), timeout=30, what="the gateway")
+
+
+def _fake_launchctl(tmp_path, monkeypatch, job_pgid):
+    """``launchctl bootout`` that SIGTERMs the job's process group, as launchd tears a job down."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "launchctl"
+    fake.write_text(f'#!/bin/sh\n[ "$1" = bootout ] && kill -TERM -{int(job_pgid)}\nexit 0\n', encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("drain_s", [1.5, None], ids=["drains", "never-exits"])
+def test_stopping_a_launchd_job_waits_for_its_gateway_not_the_job(tmp_path, monkeypatch, drain_s):
+    """The job PID dies at once on bootout; its gateway may drain for a minute. The stop returns
+    only once THAT gateway exited, marked as planned, and refuses the pause when it never does."""
+    from gateway.status import get_process_start_time
+    from hermes_cli import update_cmd_posix_pause as pause
+
+    job, gateway_pid = _launchd_job_tree(tmp_path, drain_s)
+    try:
+        _fake_launchctl(tmp_path, monkeypatch, job.pid)
+        monkeypatch.setattr(pause, "_STOP_TIMEOUT_S", 6.0)
+        entry = {"kind": "launchd", "label": "ai.hermes.gateway", "domain": "gui/501", "home": str(tmp_path),
+                 "pid": gateway_pid, "job_pid": job.pid, "ct": get_process_start_time(gateway_pid)}
+        if drain_s is None:
+            with pytest.raises(pause.PauseRefused, match=str(gateway_pid)):
+                pause._stop_job(entry)
+        else:
+            pause._stop_job(entry)
+            assert not pause._alive(gateway_pid, entry["ct"]), "returned while the gateway still ran"
+        marker = json.loads((tmp_path / ".gateway-planned-stop.json").read_text(encoding="utf-8"))
+        assert marker["target_pid"] == gateway_pid
+    finally:
+        (tmp_path / "stop").touch()
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(job.pid, signal.SIGKILL)  # windows-footgun: ok — posix-only test
+        job.wait(timeout=30)
+        wait_until(lambda: not pause._alive(gateway_pid, None), timeout=30, what="the gateway to exit")
