@@ -95,6 +95,15 @@ def _orphan(oid):
         )
 
 
+def _age(oid, seconds):
+    """Backdate the row's last state change by *seconds*."""
+    with dl._connect() as conn:
+        conn.execute(
+            "UPDATE delivery_obligations SET updated_at=updated_at-? WHERE obligation_id=?",
+            (seconds, oid),
+        )
+
+
 class TestSchemaMigration:
     def test_adds_adapter_profile_to_existing_ledger(self):
         conn = sqlite3.connect(dl._db_path())
@@ -364,6 +373,74 @@ class TestRuntimeFailedSweep:
             )
 
         assert dl.sweep_failed_for_runtime("telegram", now=now) == []
+        assert _row("ob-1")["state"] == "abandoned"
+
+    def test_stale_attempting_row_is_reclaimed_with_the_reconnect_marker(self):
+        """MSG-1 (2026-10-24, obligation eeebc7bb): a row this live process left in 'attempting' (its send
+        was cancelled, or the delivered/failed write was lost) waited 78 minutes for the next restart,
+        because the runtime sweep only took 'failed' rows. It is now reclaimed, marked."""
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+        later = time.time() + dl.STALE_ATTEMPTING_SECONDS + 1
+
+        claimed = dl.sweep_failed_for_runtime("telegram", now=later)
+
+        assert [r["obligation_id"] for r in claimed] == ["ob-1"]
+        assert claimed[0]["needs_marker"] is True
+        assert claimed[0]["marker"] == dl.RECONNECTED_MARKER
+        assert claimed[0]["attempts"] == 1
+        assert _row("ob-1")["state"] == "attempting"
+        # The claim re-stamps the row: a second sweep at the same moment cannot take it again.
+        assert dl.sweep_failed_for_runtime("telegram", now=later) == []
+
+    def test_recent_attempting_row_is_left_to_its_send(self):
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+
+        assert dl.sweep_failed_for_runtime("telegram", now=time.time() + dl.STALE_ATTEMPTING_SECONDS - 5) == []
+        assert _row("ob-1")["attempts"] == 0
+
+    def test_attempting_row_whose_send_is_in_flight_is_never_reclaimed(self):
+        """A slow send is not a stuck one: while this process is still sending the row, no sweep may
+        start a second copy of it, however old the row is."""
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+        later = time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS
+
+        with dl.sending(["ob-1"]):
+            assert dl.sweep_failed_for_runtime("telegram", now=later) == []
+        assert _row("ob-1")["attempts"] == 0
+        assert [r["obligation_id"] for r in dl.sweep_failed_for_runtime("telegram", now=later)] == ["ob-1"]
+
+    def test_nested_in_flight_registration_holds_until_the_outer_block_exits(self):
+        """Registrations nest (a send's finalize triggers a reconnect redelivery of the same row; the boot
+        task wraps its own redelivery): an inner exit must not unregister a row the outer still holds."""
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+        later = time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS
+
+        with dl.sending(["ob-1"]):
+            with dl.sending(["ob-1"]):
+                pass
+            assert dl.sweep_failed_for_runtime("telegram", now=later) == []
+        assert [r["obligation_id"] for r in dl.sweep_failed_for_runtime("telegram", now=later)] == ["ob-1"]
+
+    def test_stale_attempting_row_of_another_process_is_not_reclaimed(self, monkeypatch):
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+        monkeypatch.setattr(dl, "_owner_stamp", lambda: (54321, 202))
+
+        assert dl.sweep_failed_for_runtime("telegram", now=time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS) == []
+        assert _row("ob-1")["state"] == "attempting"
+        assert _row("ob-1")["attempts"] == 0
+
+    def test_stale_attempting_row_at_the_attempt_cap_is_abandoned(self):
+        _record(platform="telegram")
+        dl.mark_attempting("ob-1")
+        with dl._connect() as conn:
+            conn.execute("UPDATE delivery_obligations SET attempts=? WHERE obligation_id='ob-1'", (dl.MAX_ATTEMPTS,))
+
+        assert dl.sweep_failed_for_runtime("telegram", now=time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS) == []
         assert _row("ob-1")["state"] == "abandoned"
 
 
@@ -678,6 +755,158 @@ class TestGatewayRedeliverySweep:
         hang.set()
         assert await task == 1
 
+    @staticmethod
+    def _refusing_adapter(error="send_path_degraded"):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=MagicMock(success=False, error=error))
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_runtime_degraded_adapter_releases_claim_without_spending_an_attempt(self):
+        """A reconnect in degraded mode (Telegram's receive path not yet proven) installs an adapter whose
+        send() refuses every message with ``send_path_degraded`` without touching the network. Sending
+        the claim there spent an attempt on a no-op and left the row reconnect-only with no later sweep."""
+        from gateway.config import Platform
+
+        _record(platform="slack")
+        dl.mark_failed("ob-1", "send_path_degraded")
+        adapter = self._refusing_adapter()
+        adapter.send_path_degraded = True
+        runner = self._runner(adapter)
+
+        n = await runner._redeliver_failed_obligations_for_platform(Platform.SLACK)
+
+        assert n == 0
+        adapter.send.assert_not_awaited()
+        assert _row("ob-1")["state"] == "failed"
+        assert _row("ob-1")["attempts"] == 0
+        assert _row("ob-1")["last_error"] == "send_path_degraded"
+
+    @pytest.mark.asyncio
+    async def test_reply_survives_an_outage_and_a_degraded_reconnect(self):
+        """MSG-1 end to end (2026-10-23, obligation 2b168c6d): the final reply fails 'Not connected' while
+        Telegram is down, the backoff timer finds no adapter, Telegram comes back degraded at 09:48, and
+        only later proves its send path. The reply goes out then, marked, on its first attempt, instead
+        of ten hours later at the next restart."""
+        from gateway.config import Platform
+
+        _record(platform="telegram", chat_id="T1")
+        dl.mark_failed("ob-1", "Not connected")
+        runner = self._runner()
+
+        # The 30 s backoff timer fires while the fatal-error handler has removed the adapter.
+        _age("ob-1", 31)
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.TELEGRAM) == 0
+        assert _row("ob-1")["state"] == "failed"
+        assert _row("ob-1")["attempts"] == 0
+        assert _row("ob-1")["last_error"] == "send_path_degraded"
+
+        # Degraded reconnect: the adapter is back but cannot deliver yet.
+        live = self._refusing_adapter()
+        live.send_path_degraded = True
+        runner.adapters = {Platform.TELEGRAM: live}
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.TELEGRAM) == 0
+        live.send.assert_not_awaited()
+        assert _row("ob-1")["attempts"] == 0
+
+        # The send path is confirmed and the adapter's recovery hook sweeps again.
+        live.send_path_degraded = False
+        live.send = AsyncMock(return_value=MagicMock(success=True, error=""))
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.TELEGRAM) == 1
+        assert live.send.call_args.kwargs["content"] == dl.RECONNECTED_MARKER + "the final answer"
+        assert _row("ob-1")["state"] == "delivered"
+        assert _row("ob-1")["attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_reconnect_redelivers_a_stale_attempting_row(self):
+        from gateway.config import Platform
+
+        _record(platform="slack")
+        dl.mark_attempting("ob-1")
+        _age("ob-1", dl.STALE_ATTEMPTING_SECONDS + 1)
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+
+        n = await runner._redeliver_failed_obligations_for_platform(Platform.SLACK)
+
+        assert n == 1
+        assert adapter.send.call_args.kwargs["content"] == dl.RECONNECTED_MARKER + "the final answer"
+        assert _row("ob-1")["state"] == "delivered"
+
+    @pytest.mark.asyncio
+    async def test_reconnect_arms_a_timer_for_rows_not_yet_due(self):
+        """A reconnect that finds only rows still inside their backoff must leave them on a timer, not
+        assume one is armed (a timer task that died would strand them until the next restart)."""
+        from gateway.config import Platform
+
+        _record(platform="slack")
+        dl.mark_failed("ob-1", "503 Service Unavailable")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+        runner._schedule_flood_redelivery = MagicMock()
+
+        n = await runner._redeliver_failed_obligations_for_platform(Platform.SLACK)
+
+        assert n == 0
+        adapter.send.assert_not_awaited()
+        runner._schedule_flood_redelivery.assert_called_once_with("slack", profile="default")
+
+    @pytest.mark.asyncio
+    async def test_redelivery_in_flight_is_not_reclaimed_by_an_overlapping_sweep(self):
+        """Idempotency: a redelivery still sending owns its row, so a reconnect sweep that lands
+        meanwhile cannot send a second copy, however long the first send takes."""
+        import asyncio
+
+        _record()
+        _orphan("ob-1")
+        started, hang = asyncio.Event(), asyncio.Event()
+
+        async def hanging_send(**_kwargs):
+            started.set()
+            await hang.wait()
+            return MagicMock(success=True, error="")
+
+        adapter = MagicMock()
+        adapter.send = hanging_send
+        task = asyncio.create_task(self._runner(adapter)._redeliver_pending_obligations())
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        assert dl.sweep_failed_for_runtime("slack", now=time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS) == []
+
+        hang.set()
+        assert await task == 1
+        assert _row("ob-1")["state"] == "delivered"
+        assert _row("ob-1")["attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_boot_claims_waiting_behind_the_restart_notice_are_not_reclaimed(self, monkeypatch):
+        """Boot claims every recoverable row first, then sends the restart notification (a flood wait can
+        stretch it for minutes), then the rows. A reconnect sweep in that gap must not send them too, or
+        the boot loop would deliver each one a second time."""
+        import asyncio
+
+        monkeypatch.setenv("HERMES_STARTUP_RESTORE_DRAIN_TIMEOUT", "0")
+        _record()
+        _orphan("ob-1")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+        notice_started, hang = asyncio.Event(), asyncio.Event()
+
+        async def slow_notice():
+            notice_started.set()
+            await hang.wait()
+
+        runner._send_restart_notification = slow_notice
+        task = asyncio.create_task(runner._await_startup_boot_sends(planned_restart_notification_pending=False))
+        await asyncio.wait_for(notice_started.wait(), timeout=5)
+
+        assert dl.sweep_failed_for_runtime("slack", now=time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS) == []
+
+        hang.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert adapter.send.await_count == 1
+        assert _row("ob-1")["state"] == "delivered"
+
 
 class TestAttemptsOnlySpentOnRealSends:
     """``attempts`` is the redelivery budget — it must buy a send.
@@ -808,3 +1037,44 @@ class TestOwnerAlivePidProbe:
 
         monkeypatch.setattr(status, "_pid_exists", boom)
         assert dl._owner_alive(12345, 999) is False
+
+
+class TestTelegramInPlaceRecovery:
+    """MSG-1 through the real pieces: TelegramAdapter, the runner's runtime sweep and this ledger."""
+
+    @pytest.mark.asyncio
+    async def test_reply_parked_by_a_degraded_reconnect_goes_out_when_polling_confirms(self):
+        import asyncio
+
+        from gateway.config import Platform, PlatformConfig
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+
+        telegram = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+        telegram._bot = MagicMock()
+        telegram._bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
+        telegram._rich_send_disabled = True
+        telegram._write_runtime_status_safe = MagicMock()
+        runner = TestGatewayRedeliverySweep._runner()
+        runner.adapters = {Platform.TELEGRAM: telegram}
+        telegram.gateway_runner = runner
+        _record(platform="telegram", session_key="agent:main:telegram:dm:42", chat_id="42", thread_id=None)
+        dl.mark_failed("ob-1", "send_path_degraded")
+
+        # Degraded reconnect: the runner publishes the adapter and sweeps, as _install_reconnected_adapter does.
+        generation, _event = telegram._begin_polling_generation()
+        telegram._running = True
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.TELEGRAM) == 0
+        telegram._bot.send_message.assert_not_awaited()
+        assert _row("ob-1")["attempts"] == 0
+
+        # The first confirmed getUpdates round-trip: recovered in place, no runner reconnect.
+        assert telegram._record_polling_progress(generation) is True
+        for _ in range(100):
+            if _row("ob-1")["state"] == "delivered":
+                break
+            await asyncio.sleep(0.01)
+
+        assert _row("ob-1")["state"] == "delivered"
+        assert _row("ob-1")["attempts"] == 1
+        telegram._bot.send_message.assert_awaited_once()
+        assert telegram._bot.send_message.await_args.kwargs["text"].endswith("the final answer")

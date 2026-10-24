@@ -12,6 +12,8 @@ best-effort: ledger failures must never block a send; callers wrap every call in
 
 from __future__ import annotations
 
+import collections
+import contextlib
 import hashlib
 import logging
 import os
@@ -58,6 +60,32 @@ _RUNTIME_RETRYABLE_ERRORS = frozenset({"send_path_degraded"})
 # One tier per in-process retry; the last budgeted attempt is left to the boot sweep (retry_not_before).
 _RETRY_BACKOFF_SECONDS = (30.0, 120.0)
 assert len(_RETRY_BACKOFF_SECONDS) == MAX_ATTEMPTS - 1
+
+# A row this live process left in 'attempting' with no send of it still running here (the send coroutine
+# was cancelled, or the write recording its outcome failed) is otherwise invisible until the next boot:
+# the runtime sweep reclaims it once it has been quiet this long. The in-flight registry below, not this
+# age, is what keeps a slow send from being sent a second time.
+STALE_ATTEMPTING_SECONDS = 120.0
+_IN_FLIGHT: collections.Counter = collections.Counter()  # a multiset: registrations of one row nest
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def sending(obligation_ids):
+    """Mark *obligation_ids* as being sent by this process for the duration of the block, so no runtime
+    sweep reclaims them meanwhile. Process-local on purpose: the runtime sweep only ever reclaims rows
+    owned by this process, and a restart's boot sweep only rows whose owner is dead."""
+    ids = {oid for oid in obligation_ids if oid}
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.update(ids)
+    try:
+        yield
+    finally:
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.subtract(ids)
+            for oid in ids:
+                if _IN_FLIGHT[oid] <= 0:
+                    del _IN_FLIGHT[oid]
 
 # A final send the platform refused with flood control is the other transient case: a 429 means the
 # refused request was never accepted, and the platform said how long to wait. Adapters fail such sends
@@ -426,7 +454,7 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
                 continue
             # Every claim starts a send, so the row leaves 'pending'/'failed' for 'attempting' in the same
             # CAS: a boot killed inside the redelivery then leaves proof the platform may have it (next boot
-            # marks it), and the runtime sweep, which only takes 'failed', cannot re-claim it mid-send. A
+            # marks it), and the runtime sweep cannot re-claim it mid-send (the boot holds it in flight). A
             # claimed flood row also drops its stale refusal, so an interrupted resend has no error.
             cursor = conn.execute(
                 """UPDATE delivery_obligations
@@ -448,7 +476,8 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
 
 def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
                              profile: Optional[str] = None) -> list[dict[str, Any]]:
-    """Claim this process's failed rows that are due for another send, for one adapter.
+    """Claim this process's failed rows that are due for another send, for one adapter, plus its stuck
+    'attempting' rows: quiet for ``STALE_ATTEMPTING_SECONDS`` with no send of them in flight here.
 
     ``profile`` scopes multiplexed gateways to the bot identity that owned the failed send (``None`` =
     primary/default adapter); unowned rows and rows owned by another process are left for the
@@ -456,8 +485,8 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
     rejected with ``send_path_degraded`` would stay stranded when only the adapter reconnects; this closes
     that gap without weakening ownership: only rows stamped to this exact process instance, only rows
     past their ``retry_not_before`` deadline, same attempts/staleness bounds, every update guarded by the
-    prior owner stamp and ``failed`` state. Claimed rows always carry a marker (the failed send's ack is not safe to
-    infer): the reconnect one, or the rate-limit one for a flood-refused row."""
+    prior owner stamp and state. Claimed rows always carry a marker (the failed or stuck send's ack is not
+    safe to infer): the reconnect one, or the rate-limit one for a flood-refused row."""
     now, (pid, started) = now if now is not None else time.time(), _owner_stamp()
     if started is None:  # PID alone cannot distinguish this process from a stale row left after PID
         return []        # reuse; runtime replay is optional, so fail closed (startup recovery remains).
@@ -467,23 +496,31 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
         rows = conn.execute(
             """SELECT obligation_id, session_key, platform, chat_id, thread_id,
                       content, attempts, created_at, owner_pid,
-                      owner_started_at, last_error, adapter_profile, updated_at
+                      owner_started_at, last_error, adapter_profile, updated_at, state
                FROM delivery_obligations
-               WHERE state='failed' AND platform=?""", (platform,)).fetchall()
+               WHERE state IN ('failed', 'attempting') AND platform=?""", (platform,)).fetchall()
+        with _IN_FLIGHT_LOCK:
+            in_flight = set(_IN_FLIGHT)
         for (oid, session_key, row_platform, chat_id, thread_id, content, attempts, created_at,
-             owner_pid, owner_started_at, last_error, adapter_profile, updated_at) in rows:
+             owner_pid, owner_started_at, last_error, adapter_profile, updated_at, state) in rows:
             # Exact process-start matching prevents PID reuse from stealing work.
             if adapter_profile != expected_profile or owner_pid != pid or owner_started_at != started:
                 continue
-            due = retry_not_before(updated_at, last_error, attempts)
-            if due is None:
-                continue
-            owner_guard = (now, oid, owner_pid, owner_started_at)
+            if state == "attempting":
+                # Still being sent here, or not quiet long enough to call stuck: leave it to its send.
+                if oid in in_flight or now - _failed_stamp(updated_at) < STALE_ATTEMPTING_SECONDS:
+                    continue
+                due = now
+            else:
+                due = retry_not_before(updated_at, last_error, attempts)
+                if due is None:
+                    continue
+            owner_guard = (now, oid, state, owner_pid, owner_started_at)
             if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:  # exhausted -> abandoned
                 conn.execute(
                     """UPDATE delivery_obligations
                        SET state='abandoned', updated_at=?
-                       WHERE obligation_id=? AND state='failed'
+                       WHERE obligation_id=? AND state=?
                          AND owner_pid IS ? AND owner_started_at IS ?""", owner_guard)
                 continue
             if now < due:
@@ -493,7 +530,7 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
             cursor = conn.execute(
                 """UPDATE delivery_obligations
                    SET state='attempting', attempts=attempts+1, updated_at=?, last_error=NULL
-                   WHERE obligation_id=? AND state='failed'
+                   WHERE obligation_id=? AND state=?
                      AND owner_pid IS ? AND owner_started_at IS ?""", owner_guard)
             if cursor.rowcount:
                 # The failed send's ack may have been lost (reconnect) or its earlier chunks accepted

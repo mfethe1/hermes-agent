@@ -1720,6 +1720,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None,
             )
+            # Recovered in place, so no runner reconnect sweep: replay what the ledger parked meanwhile
+            # (the sweep task runs after this returns, with the flag below already cleared).
+            self._schedule_ledger_redelivery()
         self._send_path_degraded = False
         return True
 

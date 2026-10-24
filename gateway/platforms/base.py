@@ -2123,6 +2123,27 @@ class BasePlatformAdapter(ABC):
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None, **extra)
 
+    def _schedule_ledger_redelivery(self) -> None:
+        """Replay this bot's undelivered final replies once its send path recovers in place: the runner
+        did not replace the adapter, so its reconnect sweep never ran, and a reply refused or released
+        as ``send_path_degraded`` has no timer, so it would wait for the next restart. The sweep runs as
+        a background task after the caller returns. Never raises: callers are mid-way through recording
+        the recovery itself."""
+        redeliver = getattr(self.gateway_runner, "_redeliver_failed_obligations_for_platform", None)
+        if not callable(redeliver):
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                redeliver(self.platform, profile=getattr(self, "_owner_profile", None)))
+        except Exception:
+            # No running loop: the next reconnect or boot sweep still owns these rows.
+            logger.debug("ledger redelivery after %s send-path recovery not scheduled", self.platform, exc_info=True)
+            return
+        tracked = getattr(self, "_background_tasks", None)
+        if isinstance(tracked, set):  # cancelled with the adapter's other tasks on disconnect
+            tracked.add(task)
+            task.add_done_callback(tracked.discard)
+
     def _mark_degraded(self) -> None:
         """Publish ``retrying`` for a running adapter whose delivery path is unproven."""
         self._write_runtime_status_safe(
@@ -4354,18 +4375,22 @@ class BasePlatformAdapter(ABC):
         supplies the source and the ledger identity (``ledger_message_id`` or ``message_id``).
         Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
         (an ephemeral delete must go to the same transport)."""
+        from gateway.delivery_ledger import sending
+
         delivery_adapter = self._final_delivery_adapter(event.source)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
         obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
-        if obligation_id is not None:
-            await self._release_turn_marker(event)  # the ledger now owns the crash recovery
-        result = await delivery_adapter._send_with_retry(
-            chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
-        stop_reply_clock(delivery_adapter, event.source.chat_id, result)
-        if obligation_id is not None:
-            await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
+        # In flight until settled: a reconnect sweep may reclaim a stuck 'attempting' row, never a slow one.
+        with sending([obligation_id]):
+            if obligation_id is not None:
+                await self._release_turn_marker(event)  # the ledger now owns the crash recovery
+            result = await delivery_adapter._send_with_retry(
+                chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+            stop_reply_clock(delivery_adapter, event.source.chat_id, result)
+            if obligation_id is not None:
+                await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
         return result, delivery_adapter
 
     async def _release_turn_marker(self, event: MessageEvent) -> None:

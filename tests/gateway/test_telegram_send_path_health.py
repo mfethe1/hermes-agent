@@ -227,3 +227,69 @@ def test_record_polling_progress_does_not_flip_when_not_running_or_fatal(running
 
     write_status.assert_not_called()
     assert adapter._send_path_degraded is False
+
+
+def _ledger_runner():
+    runner = MagicMock()
+    runner._redeliver_failed_obligations_for_platform = AsyncMock(return_value=0)
+    return runner
+
+
+async def _drain_scheduled():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_send_path_confirmed_after_degraded_reconnect_sweeps_the_ledger():
+    """MSG-1 (2026-10-23): Telegram came back in degraded mode and proved its send path in place (first
+    getUpdates round-trip) without the runner replacing the adapter, so no reconnect sweep ran and the
+    reply parked as ``send_path_degraded`` waited ten hours for the next restart. The flip back to
+    healthy now replays the ledger for this bot, once per recovery."""
+    from gateway.config import Platform
+
+    adapter = _make_adapter()
+    adapter.gateway_runner = runner = _ledger_runner()
+    generation, _event = adapter._begin_polling_generation()
+    adapter._running = True
+
+    with patch.object(adapter, "_write_runtime_status_safe"):
+        adapter._record_polling_progress(generation)
+        adapter._record_polling_progress(generation)  # later round-trips are not a new recovery
+    await _drain_scheduled()
+
+    runner._redeliver_failed_obligations_for_platform.assert_awaited_once_with(Platform.TELEGRAM, profile=None)
+
+
+@pytest.mark.parametrize("running, fatal", [(False, False), (True, True)])
+@pytest.mark.asyncio
+async def test_send_path_confirmation_does_not_sweep_when_not_running_or_fatal(running, fatal):
+    """Cold connect: the runner sweeps after it publishes the adapter. Fatal: nothing can be sent."""
+    adapter = _make_adapter()
+    adapter.gateway_runner = runner = _ledger_runner()
+    generation, _event = adapter._begin_polling_generation()
+    adapter._running = running
+    if fatal:
+        adapter._fatal_error_message = "dead"
+
+    with patch.object(adapter, "_write_runtime_status_safe"):
+        adapter._record_polling_progress(generation)
+    await _drain_scheduled()
+
+    runner._redeliver_failed_obligations_for_platform.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_path_recovery_is_recorded_even_if_the_ledger_sweep_cannot_start():
+    """The hook runs before the degraded flag clears: if the sweep cannot be scheduled, the adapter must
+    still leave degraded mode, or it would go on refusing every send."""
+    adapter = _make_adapter()
+    adapter.gateway_runner = runner = MagicMock()  # returns no coroutine, so create_task() refuses it
+    generation, _event = adapter._begin_polling_generation()
+    adapter._running = True
+
+    with patch.object(adapter, "_write_runtime_status_safe"):
+        assert adapter._record_polling_progress(generation) is True
+
+    assert adapter._send_path_degraded is False
+    runner._redeliver_failed_obligations_for_platform.assert_called_once()

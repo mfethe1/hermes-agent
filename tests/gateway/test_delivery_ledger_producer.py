@@ -9,6 +9,7 @@ block the send.
 
 import asyncio
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -211,3 +212,27 @@ class TestProducerHook:
         claimed = dl.sweep_recoverable()
         assert len(claimed) == 1
         assert claimed[0]["needs_marker"] is True
+
+    @pytest.mark.asyncio
+    async def test_first_send_in_flight_is_not_reclaimed_by_a_reconnect_sweep(self):
+        """A slow final send (a chunked reply, an inline flood wait) owns its row for as long as it runs:
+        a reconnect sweep landing meanwhile must not start a second, marked copy of the same reply."""
+        adapter = _Adapter()
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_send(chat_id, content, reply_to=None, metadata=None):
+            started.set()
+            await release.wait()
+            adapter.sent.append(content)
+            return SendResult(success=True, message_id="m1")
+
+        adapter.send = slow_send
+        task = asyncio.create_task(_run(adapter, _event()))
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        assert dl.sweep_failed_for_runtime("slack", now=time.time() + 10 * dl.STALE_ATTEMPTING_SECONDS) == []
+
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert adapter.sent == ["final answer"]
+        assert _rows()[0][1] == "delivered"
