@@ -2230,6 +2230,23 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
         logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
 
 
+def _end_agentless_cron_session(owner_execution, job_id: str, *, noop: bool) -> None:
+    """End the session the canonical owner created for this fire when no agent ever ran in it.
+
+    The owner commits each fire's session before run_job's gates run, and _finalize_cron_session only
+    closes a session whose store the run opened, so a gated tick (monitor output unchanged,
+    wakeAgent=false) or a run that failed before its agent existed left an empty session open forever
+    (~870 a day with monitor-gated jobs). ``noop`` books a deliberate skip as ``cron_noop``, anything
+    else as ``cron_not_run``. Best-effort and bounded, like the finalizer; a no-op off the owner path."""
+    if owner_execution is None:
+        return
+    try:
+        _BoundedCronSessionDB(owner_execution[0].db, job_id).end_session(
+            owner_execution[1], "cron_noop" if noop else "cron_not_run")
+    except (Exception, KeyboardInterrupt) as e:
+        logger.debug("Job '%s': failed to end agentless cron session: %s", job_id, e)
+
+
 def _normalize_newlines(text: str) -> str:
     """CRLF/CR -> LF, matching what text-mode reads of the archive return."""
     return text.replace("\r\n", "\n").replace("\r", "\n")
@@ -2590,6 +2607,7 @@ def run_job(
 
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
+        _end_agentless_cron_session(owner_execution, job_id, noop=early[0])
         return early
     from run_agent import AIAgent
 
@@ -2686,6 +2704,9 @@ def run_job(
         if _session_db and not _worker_teardown_deferred:
             _finalize_cron_session(_session_db, agent, job_id, job_name, _cron_session_id,
                                    workdir=scope.workdir)
+        elif _session_db is None:
+            # Blocked or failed before the agent's store was opened (preflight, config, provider).
+            _end_agentless_cron_session(owner_execution, job_id, noop=False)
         # Tear down the ephemeral agent or the gateway leaks fds per tick (EMFILE). With deferred
         # teardown, hand the live agent back: delivery needs a live async client.
         # Release subprocesses, terminal sandboxes, browser daemons, and the main OpenAI/httpx client held

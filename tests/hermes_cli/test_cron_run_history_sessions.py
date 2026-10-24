@@ -220,3 +220,34 @@ async def test_an_overlapping_attempt_claimed_before_a_runs_doc_keeps_its_own_ro
     assert [r['source'] for r in runs] == ['cron_output', 'cron'], runs
     assert runs[0]['title'].startswith('FAILED') and runs[0]['preview'] == 'owner_unavailable', runs
     assert (runs[1]['id'], runs[1]['cron_execution_id']) == (session_id, fire)
+
+
+@pytest.mark.asyncio
+async def test_gated_fire_ends_the_session_its_producer_created(owner):
+    """ST-7: the producer commits each fire's session before run_job's gates run; a fire its wake gate
+    skips never opened the store the finalizer closes, so its session stayed open (and scheduler-owned
+    in run history) forever. The gated fire now ends it as a no-op."""
+    import asyncio
+    from pathlib import Path
+
+    from cron.scheduler import SILENT_MARKER, run_job
+    from gateway.session_cron import _execution, bind_execution
+
+    home = Path(owner.db.db_path).parent
+    (home / 'scripts').mkdir(exist_ok=True)
+    (home / 'scripts' / 'gate.sh').write_text('echo \'{"wakeAgent": false}\'\n', encoding='utf-8')
+    job = jobs.create_job(prompt='report', schedule='every 1h', deliver='local', script='gate.sh')
+    session_id, execution_id, _claim = await _start_fire(owner, job['id'])
+    assert owner.db.get_session(session_id)['ended_at'] is None
+
+    token = bind_execution(owner, session_id, job['id'], execution_id)
+    try:
+        result = await asyncio.to_thread(run_job, dict(job, execution_id=execution_id),
+                                         execution_id=execution_id)
+    finally:
+        _execution.reset(token)
+
+    assert result[0] is True and result[2] == SILENT_MARKER
+    row = owner.db.get_session(session_id)
+    assert row['ended_at'] is not None
+    assert row['end_reason'] == 'cron_noop'

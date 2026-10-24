@@ -111,8 +111,10 @@ class SessionMaintenanceMixin:
     """Retention pruning, stale-session archiving and VACUUM policy for SessionDB."""
 
     def prune_empty_ghost_sessions(self, sessions_dir: Optional[Path] = None) -> int:
-        """Remove empty TUI ghost sessions (no messages, no title, >24hr old)."""
-        cutoff = time.time() - 86400
+        """Remove empty ghost sessions (no messages, no title): ended TUI rows >24hr old, and cron rows
+        >1hr old, ended or not, that no live turn lease guards. A canonical cron fire creates its session
+        before the run's gates, and a gated fire used to leave it open and empty forever (ST-7)."""
+        now = time.time()
         def _do(conn):
             ids = [r[0] for r in conn.execute("""
                 SELECT id FROM sessions
@@ -123,7 +125,18 @@ class SessionMaintenanceMixin:
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )
-            """, (cutoff,)).fetchall()]
+            """, (now - 86400,)).fetchall()]
+            cron_ids = [r[0] for r in conn.execute("""
+                SELECT id FROM sessions
+                WHERE source = 'cron'
+                  AND title IS NULL
+                  AND started_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id
+                  )
+            """, (now - 3600,)).fetchall()]
+            guarded = self._guarded_ids(conn, cron_ids)
+            ids += [sid for sid in cron_ids if sid not in guarded]
             from hermes_state_mutation_retirement import retire_prunable
             ids = retire_prunable(conn, ids)
             for chunk in _id_chunks(ids):

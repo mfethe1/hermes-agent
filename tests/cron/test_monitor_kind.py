@@ -418,6 +418,72 @@ def test_monitor_script_failure_is_error_not_change(hermes_env, monkeypatch):
     assert get_job(job["id"])["monitor_state"]["last_output_hash"] == stored_hash
 
 
+def _cron_sessions(home):
+    """``(ended_at, end_reason)`` of every cron session in *home*'s state.db, oldest first."""
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{home / 'state.db'}?mode=ro", uri=True)
+    try:
+        return conn.execute(
+            "SELECT ended_at, end_reason FROM sessions WHERE source = 'cron' ORDER BY started_at, rowid"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_suppressed_tick_ends_the_session_its_owner_created(hermes_env, monkeypatch):
+    """ST-7 (since 2026-10-21, ~870 a day): the canonical owner creates each fire's session before
+    run_job's monitor gate runs, and only an agent run ever closed it, so every unchanged tick left
+    an empty session open forever. A suppressed tick now ends it as a no-op."""
+    from cron.jobs import get_job
+    from cron.scheduler import SILENT_MARKER, run_job
+
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    _install_agent_stubs(monkeypatch, {})
+    run_job(job)
+    assert run_job(get_job(job["id"]))[2] == SILENT_MARKER
+
+    (_ran_ended_at, ran_reason), (ended_at, end_reason) = _cron_sessions(hermes_env)
+    assert ran_reason not in (None, "cron_noop", "cron_not_run")  # the agent run keeps its own reason
+    assert ended_at is not None
+    assert end_reason == "cron_noop"
+
+
+def test_failed_monitor_source_ends_its_session_as_not_run(hermes_env, monkeypatch):
+    from cron.jobs import get_job
+    from cron.scheduler import run_job
+
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    _install_agent_stubs(monkeypatch, {})
+    run_job(job)
+    _write_script(hermes_env, "mon.sh", "echo boom >&2\nexit 3\n")
+    assert run_job(get_job(job["id"]))[0] is False
+
+    ended_at, end_reason = _cron_sessions(hermes_env)[-1]
+    assert ended_at is not None
+    assert end_reason == "cron_not_run"
+
+
+def test_run_failing_before_the_agent_exists_ends_its_session(hermes_env, monkeypatch):
+    """Past every gate a run can still fail before the agent (and the store its finalizer closes)
+    exists, e.g. on a config or provider error; its session must not stay open either."""
+    import cron.scheduler as sched
+    from cron.jobs import create_job
+
+    _install_agent_stubs(monkeypatch, {})
+    job = create_job(prompt="Say hi", model="test-model", schedule="every 5m", deliver="local")
+
+    def _broken_config(*_args, **_kwargs):
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(sched, "_load_cron_job_config", _broken_config)
+    assert sched.run_job(job)[0] is False
+
+    [(ended_at, end_reason)] = _cron_sessions(hermes_env)
+    assert ended_at is not None
+    assert end_reason == "cron_not_run"
+
+
 # ---------------------------------------------------------------------------
 # cronjob tool: API-layer wiring
 # ---------------------------------------------------------------------------
