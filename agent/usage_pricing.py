@@ -575,10 +575,17 @@ def _models_dev_pricing_entry(route: BillingRoute) -> Optional[PricingEntry]:
 def get_pricing_entry(
     model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    *, allow_network: bool = True,
 ) -> Optional[PricingEntry]:
+    if type(allow_network) is not bool:
+        raise TypeError("allow_network must be a bool")
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return _INCLUDED_ENTRY
+    if not allow_network:
+        # Bundled genuine prices remain usable. A miss stays unknown; neither a
+        # warm endpoint cache nor models.dev may widen this caller's authority.
+        return _lookup_official_docs_pricing(route)
     if route.provider == "openrouter":
         return _openrouter_pricing_entry(route)
 
@@ -686,7 +693,10 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 def estimate_usage_cost(
     model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
     base_url: Optional[str] = None, api_key: Optional[str] = None,
+    allow_network: bool = True,
 ) -> CostResult:
+    if type(allow_network) is not bool:
+        raise TypeError("allow_network must be a bool")
     from providers import get_provider_profile
     profile = get_provider_profile(provider or '')
     reported = profile.get_usage_cost(model_name, usage) if profile else None
@@ -699,7 +709,10 @@ def estimate_usage_cost(
             pricing_version="included-route", notes=(_INCLUDED_NOTE,),
         )
 
-    entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
+    entry = get_pricing_entry(
+        model_name, provider=provider, base_url=base_url, api_key=api_key,
+        **({"allow_network": False} if not allow_network else {}),
+    )
     if route.provider == "anthropic" and _served_fast(usage):
         entry = _anthropic_fast_mode_entry(route.model)
         if not entry:

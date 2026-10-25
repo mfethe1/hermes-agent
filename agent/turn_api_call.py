@@ -48,6 +48,10 @@ def _should_stream(agent: Any) -> bool:
     checks); disabled on provider signal, ACP providers (``acp://`` scheme or an
     external-process provider profile), MoA without a display consumer, or Mock clients in
     tests (SimpleNamespace, not stream iterators)."""
+    # This bounded lane is deliberately non-streaming: native streaming workers
+    # log/classify wrapped SDK errors before handle_api_error can sanitize them.
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        return False
     if getattr(agent, "_disable_streaming", False):
         return False
     _base = str(agent.base_url or "").lower()
@@ -71,6 +75,10 @@ def perform_api_call(
     interrupted: Any,
 ) -> ApiCallVerdict:
     """Issue the request (see ``_should_stream`` for the streaming decision)."""
+    policy = getattr(agent, "_openai_request_policy", None)
+    if policy is not None:
+        policy.validate_runtime(provider=agent.provider, model=agent.model, api_mode=agent.api_mode)
+        policy.validate_client(agent.client)
     response = None
 
     def _verdict(action: str) -> ApiCallVerdict:
