@@ -1912,6 +1912,13 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
             profile = _profile_for_base_url(base_url)
     if profile is None:
         return None
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        from agent.native_request_policy import OpenAIRequestPolicyError
+        from providers.base import ProviderProfile
+        # Refuse a custom transport before constructing it, rather than silently
+        # bypassing the provider's native SDK with an OpenAI impersonation.
+        if getattr(profile.create_client, "__func__", None) is not ProviderProfile.create_client:
+            raise OpenAIRequestPolicyError("Provider-supplied clients do not support native request policy")
     try:
         return profile.create_client(**client_kwargs)
     except Exception:
@@ -1978,6 +1985,17 @@ def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: s
 
 
 def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
+    """Construct/recreate the real native client; sanitize opt-in construction failures."""
+    try:
+        return _create_openai_client_impl(agent, client_kwargs, reason=reason, shared=shared)
+    except Exception:
+        if getattr(agent, "_openai_request_policy", None) is not None:
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            raise OpenAIRequestPolicyError("Native guarded client creation refused") from None
+        raise
+
+
+def _create_openai_client_impl(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
     from agent.auxiliary_client import (
         _to_openai_base_url,
         _validate_base_url,
@@ -1995,6 +2013,10 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     client_kwargs = dict(client_kwargs)
     if client_kwargs.get("base_url"):
         client_kwargs["base_url"] = _to_openai_base_url(client_kwargs["base_url"])
+    policy = getattr(agent, "_openai_request_policy", None)
+    if policy is not None:
+        policy.validate_runtime(provider=agent.provider, model=agent.model, api_mode=agent.api_mode)
+        policy.validate_client_kwargs(client_kwargs)
     try:
         from providers import get_provider_profile
 
@@ -2005,6 +2027,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             ).items():
                 client_kwargs.setdefault(key, value)
     except Exception:
+        if policy is not None:
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            raise OpenAIRequestPolicyError("Native provider client-kwargs hook failed") from None
         _ra().logger.debug("Provider client-kwargs hook skipped", exc_info=True)
     # The MoA virtual provider has no OpenAI wire endpoint; the facade *is* the client. Rebuild the
     # facade, never a native client (TypeError; relay re-wire).
@@ -2014,6 +2039,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # base_url, leaks the request to a foreign gateway. Rebuild the facade instead (build_moa_facade also
     # re-wires the reference relay, see #53802).
     if (getattr(agent, "provider", "") or "").strip().lower() == "moa":
+        if policy is not None:
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            raise OpenAIRequestPolicyError("Native request policy requires the OpenAI HTTP SDK")
         from agent.moa_loop import build_moa_facade
         return build_moa_facade(agent, getattr(agent, "model", None) or "default")
     ssl_ca_cert = client_kwargs.pop("ssl_ca_cert", None)
@@ -2038,6 +2066,11 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         return provider_client
     from agent.auxiliary_client import _GEMINI_NATIVE_PROVIDER_NAMES
     if agent.provider in _GEMINI_NATIVE_PROVIDER_NAMES:
+        if policy is not None:
+            from agent.gemini_native_adapter import is_native_gemini_base_url
+            if is_native_gemini_base_url(str(client_kwargs.get("base_url", ""))):
+                from agent.native_request_policy import OpenAIRequestPolicyError
+                raise OpenAIRequestPolicyError("Native Gemini clients do not support native request policy")
         client = _gemini_native_client(agent, client_kwargs, httpx_verify, reason=reason, shared=shared)
         if client is not None:
             return client
@@ -2065,7 +2098,13 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         configure_bedrock_openai_client_kwargs(
             client_kwargs, timeout=timeout if isinstance(timeout, (int, float)) else None,
         )
-    if "http_client" not in client_kwargs:
+    if policy is not None:
+        # Recheck after provider extras/signing: a foreign client could mount an
+        # unguarded transport or implement its own retry. Never reuse its ownership.
+        policy.validate_client_kwargs(client_kwargs)
+        client_kwargs["http_client"] = policy.build_http_client(verify=httpx_verify)
+        client_kwargs["max_retries"] = 0
+    elif "http_client" not in client_kwargs:
         keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""), verify=httpx_verify)
         if keepalive_http is not None:
             client_kwargs["http_client"] = keepalive_http
@@ -2088,8 +2127,18 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     # ``process_bootstrap.OpenAI`` is a lazy SDK proxy; resolved at call time so tests can patch it.
     from agent import process_bootstrap
-    client = process_bootstrap.OpenAI(**client_kwargs)
+    try:
+        client = process_bootstrap.OpenAI(**client_kwargs)
+    except Exception:
+        if policy is not None:
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            with contextlib.suppress(Exception):
+                client_kwargs["http_client"].close()
+            raise OpenAIRequestPolicyError("Native guarded client creation failed") from None
+        raise
     # Routing proxies name the deployment they served in a response header (#54864).
+    if policy is not None:
+        client._hermes_native_request_policy = policy
     from agent.served_model import install_served_model_capture
     install_served_model_capture(agent, client)
     _ra().logger.info("OpenAI client created (%s, shared=%s) %s", reason, shared, agent._client_log_context())
@@ -2468,6 +2517,9 @@ def switch_model(
     compressor). Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
     the change persists across turns. A failed swap/rebuild rolls back to the pre-switch
     snapshot and re-raises (callers catch)."""
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        from agent.native_request_policy import OpenAIRequestPolicyError
+        raise OpenAIRequestPolicyError("Model switching is forbidden by native request policy")
     old_model = agent.model
     old_provider = agent.provider
     # ── Reload credential pool for the new provider (issue #52727) ── Without this,

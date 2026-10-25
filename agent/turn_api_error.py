@@ -79,6 +79,17 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        # The SDK can wrap transport refusals. Under a single-delivery policy,
+        # every error is terminal: never classify/repair/retry/fallback or echo
+        # provider error text, request data, or exception chains to the caller.
+        message = "Native guarded request failed; no retry is authorized."
+        return _verdict("return", {
+            "final_response": message, "messages": messages, "api_calls": api_call_count,
+            "completed": False, "failed": True, "error": message,
+            "failure_reason": "native_request_policy", "failure_retryable": False,
+        })
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,
