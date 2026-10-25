@@ -1571,7 +1571,13 @@ def _run_conversation_turn(
     ``persist_user_display_*``:
     display-only event rendering; the model still receives the message unchanged.
     ``prelude``: scripted tool calls played before the first model call (``agent/turn_scripted_prelude.py``)."""
-    if moa_config is None:
+    policy = getattr(agent, "_openai_request_policy", None)
+    if policy is not None and moa_config is not None:
+        from agent.native_request_policy import OpenAIRequestPolicyError
+        raise OpenAIRequestPolicyError("MoA turns do not support native request policy")
+    # Under the bounded native policy, caller text is conversation data, not an
+    # instruction to activate a separate inference fan-out before native dispatch.
+    if moa_config is None and policy is None:
         user_message, moa_config, persist_user_message = _decode_inline_moa_turn(
             user_message, persist_user_message
         )
