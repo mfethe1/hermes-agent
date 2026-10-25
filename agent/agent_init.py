@@ -19,8 +19,11 @@ from collections import deque
 from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse, urlunparse
+
+if TYPE_CHECKING:
+    from agent.native_request_policy import OpenAIRequestPolicy
 
 from agent.context_compressor import ContextCompressor
 from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
@@ -861,6 +864,9 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
         if is_actual_route(effective_provider):
             agent.provider = normalize_provider(effective_provider)
         return _client_kwargs_from_routed(_routed_client, _provider_timeout)
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        from agent.native_request_policy import OpenAIRequestPolicyError
+        raise OpenAIRequestPolicyError("Native request route could not be resolved")
     # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
     # must not die with a misleading "No LLM provider configured"); only explicitly named
     # providers keep the missing-key diagnostic.
@@ -1030,6 +1036,12 @@ def _build_client(agent, api_key, base_url, fallback_model):
     # responses.stream()). One provider/model timeout up front so every path applies it.
     agent._anthropic_client = None
     agent._is_anthropic_oauth = False
+    policy = getattr(agent, "_openai_request_policy", None)
+    if policy is not None:
+        policy.validate_runtime(provider=agent.provider, model=agent.model, api_mode=agent.api_mode)
+        if agent.provider == "moa":
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            raise OpenAIRequestPolicyError("Native request policy requires the OpenAI HTTP SDK")
     _provider_timeout = get_provider_request_timeout(agent.provider, agent.model)
     if agent.api_mode == "anthropic_messages":
         _init_anthropic_client(agent, api_key, base_url, _provider_timeout)
@@ -1420,6 +1432,10 @@ def _apply_agent_section(agent, _agent_cfg):
         "environment_probe", "bot_mode_protocol",
     ):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
+    # Restricted native callers must not launch ancillary toolchain subprocesses,
+    # either while warming the cache or later while building the system prompt.
+    if getattr(agent, "_openai_request_policy", None) is not None:
+        agent._environment_probe = False
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
         with suppress(Exception):
@@ -2368,9 +2384,16 @@ def init_agent(
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
     allow_budget_summary: bool = True,
+    openai_request_policy: Optional["OpenAIRequestPolicy"] = None,
 ):
     if not isinstance(allow_budget_summary, bool):
         raise TypeError("allow_budget_summary must be a bool")
+    if openai_request_policy is not None:
+        from agent.native_request_policy import OpenAIRequestPolicy
+        if not isinstance(openai_request_policy, OpenAIRequestPolicy):
+            raise TypeError("openai_request_policy must be an OpenAIRequestPolicy or None")
+    # Constructor-only authority, not a config, HTTP body or request override.
+    agent._openai_request_policy = openai_request_policy
     _install_safe_stdio()
 
     _params = locals()
@@ -2436,7 +2459,13 @@ def init_agent(
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
     _set_defaults(agent, _STREAM_STATE)
-    _build_client(agent, api_key, base_url, fallback_model)
+    try:
+        _build_client(agent, api_key, base_url, fallback_model)
+    except Exception:
+        if openai_request_policy is not None:
+            from agent.native_request_policy import OpenAIRequestPolicyError
+            raise OpenAIRequestPolicyError("Native guarded client initialization refused") from None
+        raise
     _init_fallback_chain(agent, fallback_model)
     _load_tools(agent, enabled_toolsets, disabled_toolsets)
     _init_session_state(
