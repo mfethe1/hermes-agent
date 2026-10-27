@@ -9,6 +9,7 @@ from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import SendResult
 from gateway.platforms.event import MessageEvent
 from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 from gateway.session_authority import initialize_session_authority
 from gateway.session_envelope import restore_native, snapshot_native
 from gateway.session_results import execution_result
@@ -127,3 +128,29 @@ async def test_native_codec_closed_metadata_contract_and_reply_expected(tmp_path
                     and any(k.arg == 'metadata' for k in node.keywords)):
                 producers.add(path.relative_to(REPO).as_posix())
     assert producers == {'plugins/platforms/whatsapp/adapter.py'}, producers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('platform', [Platform.TELEGRAM, Platform.WHATSAPP])
+async def test_goal_continuation_metadata_survives_native_codec(tmp_path, monkeypatch, platform):
+    """A goal resume keeps its cancellation marker; extra or malformed metadata stays refused."""
+    runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / 'sessions'))
+    adapter = object()
+    monkeypatch.setattr(runner, '_is_user_authorized_for_source', lambda *args, **kwargs: True)
+    monkeypatch.setattr(runner, '_adapter_for_source', lambda source: adapter)
+    authority = await initialize_session_authority(runner, profile_id='default', instance_id='goal-codec')
+    try:
+        source = SessionSource(platform=platform, chat_id='123', chat_type='dm', user_id='123')
+        event = MessageEvent(text='Continue the goal', source=source,
+                             metadata={'goal_continuation': True}, inherit_channel_pin=True)
+        envelope = snapshot_native(runner, event)['native_text_v1']
+        assert envelope['event']['metadata'] == {'goal_continuation': True}
+        restored = restore_native({'text': 'Continue the goal', 'native_text_v1': envelope}, runner)
+        assert restored.metadata == {'goal_continuation': True}
+        assert restored.inherit_channel_pin is True
+        for metadata in ({'goal_continuation': False}, {'goal_continuation': 'true'},
+                         {'goal_continuation': True, 'unexpected': 1}):
+            with pytest.raises(RuntimeStoreError, match='invalid_params'):
+                snapshot_native(runner, replace(event, metadata=metadata))
+    finally:
+        authority.db.close()

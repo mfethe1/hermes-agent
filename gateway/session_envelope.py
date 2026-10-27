@@ -42,6 +42,10 @@ def _native_metadata(event):
     metadata = event.metadata
     if not metadata:
         return {}
+    # Goal continuations carry this one marker for pause/cancellation handling. Keep it
+    # through the envelope; every other non-WhatsApp metadata key remains refused.
+    if isinstance(metadata, dict) and set(metadata) == {'goal_continuation'} and metadata['goal_continuation'] is True:
+        return dict(metadata)
     if (not isinstance(metadata, dict) or event.source.platform.value != 'whatsapp'
             or not set(metadata) <= _WHATSAPP_METADATA):
         return None
