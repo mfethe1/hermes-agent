@@ -364,6 +364,13 @@ async def execute_admission(authority, ref, row):
             authority.pending_results[row['admission_id']] = {
                 'result': result, 'usage': captured.get('usage', {}),
                 **({'session_usage': captured['session_usage']} if 'session_usage' in captured else {})}
+            if not is_api:
+                # The chat-facing reply only: a lost turn this sender's own message settled is
+                # named here, never folded into the stored result an API or viewer reads (FLE-72).
+                from gateway.session_person_unknown import take_lost_turn_notice
+                notice = take_lost_turn_notice(live, row)
+                if notice is not None:
+                    response = f'{notice}\n\n{response}' if response else notice
             if not is_api and response:
                 adapter = authority.runner._adapter_for_source(event.source)
                 if adapter is not None:

@@ -53,6 +53,9 @@ class LiveSession:
     # The messaging ingress tells the platform user once per pause episode (unknown head,
     # preflight refusal), not per message; the drain clears it when the FIFO moves again.
     pause_notified: bool = False
+    # Chat copy owed to the next person's reply on this session, naming the lost turn a waiting
+    # sender's own message just settled (gateway/session_person_unknown.py); consumed once.
+    lost_turn_notice: str | None = None
     mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Held by the FIFO claim and by compress across its summarization (which runs outside
     # ``mutation_lock``, so admissions are not parked behind an LLM call): no turn is claimed
@@ -660,7 +663,12 @@ class SessionAuthority:
                 self._require_admission_open()
                 self.sessions.setdefault(sid, LiveSession(source, route))
                 if any(row['status'] == 'unknown' for row in rows):
-                    raise RuntimeStoreError('unknown_execution')
+                    # A follow-up queued across the restart is the sender saying they are still
+                    # waiting: schedule the FIFO so the drain settles the lost turn and answers
+                    # them, rather than leaving the chat silent until they message again (FLE-72).
+                    from gateway.session_person_unknown import person_waiting_on_pause
+                    if not person_waiting_on_pause(rows):
+                        raise RuntimeStoreError('unknown_execution')
                 self._schedule(SessionRef(self.profile_id, sid))
                 results[sid] = 'ready'
             except RuntimeStoreError as exc:
@@ -1198,6 +1206,12 @@ class SessionAuthority:
                         # person's lost turn keeps the FIFO paused for them to resolve.
                         from gateway.session_unattended_unknown import settle_unattended_unknown
                         if await settle_unattended_unknown(self, ref):
+                            continue
+                        # A person with a message queued behind their own lost turn has already
+                        # said they want an answer: settle it as /discard would and run the queue,
+                        # instead of pausing on a notice they were told once (FLE-72).
+                        from gateway.session_person_unknown import resume_for_waiting_person
+                        if await resume_for_waiting_person(self, ref):
                             continue
                     if exc.reason == 'admission_conflict':
                         # A verdict on the head alone (its route or binding moved under it) that every drain
