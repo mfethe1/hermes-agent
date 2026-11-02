@@ -357,8 +357,25 @@ def local_receipt_ids(authority):
             'SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',))]
 
 
+def _pending_local_receipt_ids(authority):
+    """Only durable boot work needs an in-memory session; idle history mounts on resume.
+
+    Reading every stored policy here puts years of cron history on the owner loop
+    and pins it in the live registry. Include viewer closes even without a queued
+    turn: their idle drain still owes the session its end-of-conversation lifecycle.
+    """
+    from gateway.session_viewer_close import CLOSE_PREFIX
+    with authority.db._read_ctx() as conn:
+        return [row[0] for row in conn.execute(
+            "WITH pending(sid) AS ("
+            "SELECT target_session_id FROM session_admissions WHERE status IN ('queued','started','unknown') "
+            "UNION SELECT substr(key, ?) FROM state_meta WHERE key GLOB ?) "
+            "SELECT sid FROM pending JOIN state_meta ON key = ? || sid ORDER BY sid",
+            (len(CLOSE_PREFIX) + 1, CLOSE_PREFIX + '*', POLICY_PREFIX))]
+
+
 def recover_local_sessions(authority, *, schedule=False):
-    for sid in local_receipt_ids(authority):
+    for sid in _pending_local_receipt_ids(authority):
         try:
             ref = restore_local_session(authority, sid)
             pending = list_session_admissions(authority.db, session_id=sid)

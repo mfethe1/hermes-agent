@@ -366,7 +366,7 @@ async def test_a_viewer_reattaching_cancels_the_persisted_close(tmp_path, monkey
     cancel_session_input(db, epoch=authority.epoch, admission_id=row['admission_id'])
     db2, restarted, calls2 = await _restarted_owner(tmp_path, monkeypatch, db)
     recover_local_sessions(restarted, schedule=True)
-    assert restarted.sessions['chat'].task is None  # no queued turn and no close: no drain at all
+    assert 'chat' not in restarted.sessions  # no queued turn or close: mounts lazily on resume
     assert restarted.pending_closes == {} and calls2 == []
     assert db2.get_session('chat')['ended_at'] is None
 
