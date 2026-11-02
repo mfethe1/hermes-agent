@@ -29,6 +29,20 @@ async def test_idle_local_receipt_is_lazy_but_history_still_resumes(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_compression_catchup_does_not_read_idle_uncompressed_policies(tmp_path, monkeypatch):
+    from gateway import session_local_adoption
+
+    db, authority, _ = await _owner(tmp_path, monkeypatch)
+    await _open(db, authority, tmp_path)
+    inspected = []
+    monkeypatch.setattr(session_local_adoption, '_due', lambda owner, sid: inspected.append(sid))
+
+    await session_local_adoption.adopt_local_compressions(authority)
+
+    assert inspected == []
+
+
+@pytest.mark.asyncio
 async def test_queued_local_input_is_restored_and_scheduled(tmp_path, monkeypatch):
     from gateway.session_local_recovery import recover_local_sessions
     from hermes_state_runtime import admit_session_input

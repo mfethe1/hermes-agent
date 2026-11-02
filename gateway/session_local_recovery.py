@@ -351,10 +351,12 @@ def reset_local_session(store, old_entry, session_id, now, display_name):
     return entry
 
 
-def local_receipt_ids(authority):
+def local_compression_receipt_ids(authority):
+    """Only a conversation with a compression parent can owe compression catch-up."""
     with authority.db._read_ctx() as conn:
-        return [row[0][len(POLICY_PREFIX):] for row in conn.execute(
-            'SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',))]
+        return [row[0] for row in conn.execute(
+            "SELECT DISTINCT s.chat_id FROM sessions s JOIN state_meta m ON m.key = ? || s.chat_id "
+            "WHERE s.end_reason = 'compression'", (POLICY_PREFIX,))]
 
 
 def _pending_local_receipt_ids(authority):
@@ -363,13 +365,15 @@ def _pending_local_receipt_ids(authority):
     Reading every stored policy here puts years of cron history on the owner loop
     and pins it in the live registry. Include viewer closes even without a queued
     turn: their idle drain still owes the session its end-of-conversation lifecycle.
+    Compressed conversations also retain their cold-recovery validation.
     """
     from gateway.session_viewer_close import CLOSE_PREFIX
     with authority.db._read_ctx() as conn:
         return [row[0] for row in conn.execute(
             "WITH pending(sid) AS ("
             "SELECT target_session_id FROM session_admissions WHERE status IN ('queued','started','unknown') "
-            "UNION SELECT substr(key, ?) FROM state_meta WHERE key GLOB ?) "
+            "UNION SELECT substr(key, ?) FROM state_meta WHERE key GLOB ? "
+            "UNION SELECT chat_id FROM sessions WHERE end_reason = 'compression') "
             "SELECT sid FROM pending JOIN state_meta ON key = ? || sid ORDER BY sid",
             (len(CLOSE_PREFIX) + 1, CLOSE_PREFIX + '*', POLICY_PREFIX))]
 
