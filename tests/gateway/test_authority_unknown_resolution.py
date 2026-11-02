@@ -23,8 +23,14 @@ class Peer:
         return True
 
 
-async def _restarted_owner_with_unknown_head(tmp_path, monkeypatch, executed):
-    """Real authority + SQLite: a started turn interrupted by an owner epoch change plus a queued follower."""
+async def _restarted_owner_with_unknown_head(tmp_path, monkeypatch, executed, *, follower=True):
+    """Real authority + SQLite: a started turn interrupted by an owner epoch change plus a queued follower.
+
+    ``follower=False`` leaves the FIFO empty behind the lost head, so the only person's row behind
+    it is whatever the test admits itself. A caller that cares *which* reply carries the lost-turn
+    notice needs that: the notice rides the first person's turn claimed (FLE-72,
+    ``gateway/session_person_unknown.take_lost_turn_notice``), and a follower queued before the
+    restart is claimed first, with no live waiter of its own left to observe it."""
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     db = store._db
@@ -46,14 +52,15 @@ async def _restarted_owner_with_unknown_head(tmp_path, monkeypatch, executed):
     # Admit the head and claim it without draining: the owner dies mid-turn.
     first._schedule = lambda ref: None
     head = await first.submit(actor, Submission('head', ref, {'text': 'HEAD'}, 'queue'))
-    follower = await first.submit(actor, Submission('follower', ref, {'text': 'FOLLOWER'}, 'queue'))
+    queued = await first.submit(actor, Submission('follower', ref, {'text': 'FOLLOWER'}, 'queue')) if follower else None
     claimed = claim_session_input(db, epoch=first.epoch, session_id='s')
     assert claimed['admission_id'] == head.admission_id
     authority = await initialize_session_authority(runner, profile_id='p', instance_id='owner-2')
     authority.sessions['s'] = LiveSession(source, 's')
     rows = {r['admission_id']: r for r in list_session_admissions(db, session_id='s')}
-    assert rows[head.admission_id]['status'] == 'unknown' and rows[follower.admission_id]['status'] == 'queued'
-    return store, authority, ref, rows[head.admission_id], follower
+    assert rows[head.admission_id]['status'] == 'unknown'
+    assert queued is None or rows[queued.admission_id]['status'] == 'queued'
+    return store, authority, ref, rows[head.admission_id], queued
 
 
 @pytest.mark.asyncio
