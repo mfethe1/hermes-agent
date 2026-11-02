@@ -890,7 +890,7 @@ class TestHealthDetailedEndpoint:
 
         with patch("tools.process_registry.process_registry.completion_queue.qsize", return_value=0), \
              patch("tools.async_delegation.active_count", return_value=0):
-            assert adapter._readiness_work_counts() == (4, 0, 0)
+            assert adapter._readiness_work_counts() == (4, 0, 0, 0)
 
 
 # ---------------------------------------------------------------------------

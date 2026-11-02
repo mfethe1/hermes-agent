@@ -45,9 +45,14 @@ def _runner(tmp_path, monkeypatch, executed):
     return store, runner
 
 
-async def _lost_head_then_restart(tmp_path, monkeypatch, executed, admit_head):
+async def _lost_head_then_restart(tmp_path, monkeypatch, executed, admit_head, *, follower=True):
     """Owner 1 admits a head (via ``admit_head``) and a person's follower, claims the head, dies.
-    Owner 2 starts on the same store. Returns (store, owner2, head_id, follower_id)."""
+    Owner 2 starts on the same store. Returns (store, owner2, head_id, follower_id).
+
+    ``follower=False`` leaves the FIFO empty behind the lost head: a person's lost turn is only
+    settled for them when one of their own messages is waiting (FLE-72,
+    tests/gateway/test_person_unknown_resumes.py), so a test about the pause itself must not
+    queue one."""
     store, runner = _runner(tmp_path, monkeypatch, executed)
     db = store._db
     source = SessionSource(platform=Platform.TELEGRAM, chat_id='gw10')
@@ -58,13 +63,13 @@ async def _lost_head_then_restart(tmp_path, monkeypatch, executed, admit_head):
     actor = AuthorityConnection(first, Peer(), {'user_id': 'human'}).actor
     first._schedule = lambda ref: None
     head_id = await admit_head(first, actor, ref)
-    follower = await first.submit(actor, Submission('follower', ref, {'text': 'FOLLOWER'}, 'queue'))
+    queued = await first.submit(actor, Submission('follower', ref, {'text': 'FOLLOWER'}, 'queue')) if follower else None
     claimed = claim_session_input(db, epoch=first.epoch, session_id='s')
     assert claimed['admission_id'] == head_id
     db.append_message('s', 'user', 'HEAD')  # the lost turn got as far as its user row
     second = await initialize_session_authority(runner, profile_id='p', instance_id='owner-2')
     second.sessions['s'] = LiveSession(source, 's')
-    return store, second, head_id, follower.admission_id
+    return store, second, head_id, queued.admission_id if queued is not None else None
 
 
 async def _automation_head(authority, _actor, _ref):
@@ -125,15 +130,20 @@ async def test_unknown_automation_settles_interrupted_and_fifo_moves_on(tmp_path
 
 @pytest.mark.asyncio
 async def test_a_persons_unknown_turn_still_pauses_the_fifo(tmp_path, monkeypatch):
+    """The contrast with automation: nothing settles a person's lost turn on its own judgement.
+    With nobody waiting behind it the FIFO pauses for ``/discard``, and the input is never
+    replayed. (A message from that person *is* an acknowledgement and does resume it — FLE-72,
+    tests/gateway/test_person_unknown_resumes.py.)"""
     executed = []
-    store, authority, head_id, follower_id = await _lost_head_then_restart(tmp_path, monkeypatch, executed, _person_head)
+    store, authority, head_id, _ = await _lost_head_then_restart(
+        tmp_path, monkeypatch, executed, _person_head, follower=False)
     try:
         assert _statuses(authority.db)[head_id] == ('unknown', None)
         authority._schedule(SessionRef('p', 's'))
         live = authority.sessions['s']
         await async_wait_until(lambda: live.task is not None and live.task.done(), what='drain paused')
         assert executed == []
-        assert _statuses(authority.db)[follower_id] == ('queued', None)
+        assert _statuses(authority.db)[head_id] == ('unknown', None)
     finally:
         store.close_all_db_handles()
 

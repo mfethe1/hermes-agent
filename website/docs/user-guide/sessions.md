@@ -545,6 +545,27 @@ Without `--yes` the command asks for confirmation, and it refuses (exit code 2) 
 The lost input stays in the transcript. Some of its actions may already have run, so check their effects before
 you resend it. Inputs queued behind it run once it is discarded.
 
+#### In a chat, your next message discards it for you
+
+On a messaging platform you do not have to send `/discard` at all. Hermes offers it once when it pauses the
+conversation, but if you just send another message, that message *is* the acknowledgement: the lost turn is
+discarded for you (never re-run), the conversation resumes, and the reply you get back names the lost message
+and quotes its first line. This exists because the pause notice is sent only once per pause, so someone who
+keeps typing instead of reading it used to get no reply at all.
+
+Two details worth knowing:
+
+- **Repeats are answered once.** If you sent the same text several times in a row while the conversation was
+  paused, only one copy is answered; the earlier copies are dropped and the reply says so.
+- **Automated items already queued still run.** A heartbeat or a standing-goal continuation that was committed
+  to this conversation before the restart keeps its place in the queue and still runs, because only whatever
+  scheduled it knows whether it still matters. Hermes never drops them silently — the reply tells you how many
+  are coming, so an answer you did not ask for is never a surprise.
+
+An operator can see how many conversations are paused this way without opening any of them: the authenticated
+status payload reports it as `readiness.checks.paused_sessions.unknown_person_turns`. A paused conversation is
+*not* counted as a degraded runtime — only the person in that chat can clear it.
+
 ### Pin a Session
 
 Pinning sets a durable "keep" flag: pinned sessions are exempt from the
