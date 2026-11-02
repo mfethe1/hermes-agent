@@ -144,14 +144,22 @@ def take_lost_turn_notice(live, row) -> str | None:
 async def _drop_superseded_duplicates(authority, ref) -> int:
     """Cancel the earlier copies through the owner's own cancel path, so every observer of each
     dropped row settles (``_settle_cancelled`` resolves a live waiter with no reply) instead of
-    waiting for a turn that will never run."""
+    waiting for a turn that will never run.
+
+    Shielded in a tracked task exactly as ``cancel_queued`` does: a drain cancelled between the
+    cancel's commit and its observer settlement would otherwise leave a terminal row whose waiting
+    adapter task is never released. Authorization is not re-checked — this is the owner's own
+    cancel of a row it just read, like ``resolve_unknown_as_owner`` beside it.
+    """
     from gateway.session_ingress_media import release_admission_media
+    from gateway.session_runtime_workers import track_mutation
     from hermes_state_runtime import RuntimeStoreError, list_session_admissions
     rows = await asyncio.to_thread(list_session_admissions, authority.db, session_id=ref.session_id)
     dropped = 0
     for row in superseded_duplicates(rows):
         try:
-            await authority._commit_cancel(ref, row['admission_id'], authority._receipt(row))
+            await asyncio.shield(track_mutation(authority, authority._commit_cancel(
+                ref, row['admission_id'], authority._receipt(row))))
         except RuntimeStoreError as exc:
             logger.warning('Duplicate admission %s left queued: %s', row['admission_id'], exc.reason)
             continue
