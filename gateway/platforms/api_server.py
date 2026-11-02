@@ -1178,18 +1178,24 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if reservation:
             _release_pending_api_work(self, reservation)
 
-    def _readiness_work_counts(self) -> tuple[int, int, int]:
+    def _readiness_work_counts(self) -> tuple[int, int, int, int]:
         """Return bounded work counts from each subsystem's public state."""
         active_api_runs = self._active_structured_run_count()
         process_depth = 0
         active_delegations = 0
+        paused_sessions = 0
         with suppress(Exception):
             from tools.process_registry import process_registry
             process_depth = process_registry.completion_queue.qsize()
         with suppress(Exception):
             from tools.async_delegation import active_count
             active_delegations = active_count()
-        return active_api_runs, process_depth, active_delegations
+        with suppress(Exception):
+            from gateway.run_api import _ACTIVE_RUNNER
+            from gateway.session_person_unknown import paused_person_turn_count
+            if _ACTIVE_RUNNER is not None:
+                paused_sessions = paused_person_turn_count(_ACTIVE_RUNNER)
+        return active_api_runs, process_depth, active_delegations, paused_sessions
 
     def _active_structured_run_count(self) -> int:
         """Count structured runs that still have executable work."""
@@ -2290,12 +2296,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         platforms["api_server"] = api_platform
         # Served BY the gateway process, so gateway_running is True by definition; busy/
         # drainable use the same shared contract as /api/status so the two never disagree.
-        active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
+        active_api_runs, process_depth, active_delegations, paused_sessions = self._readiness_work_counts()
         from gateway.run import _resolve_gateway_model
         readiness = collect_runtime_readiness(
             configured_model=_resolve_gateway_model(), runtime_status=runtime,
             active_api_runs=active_api_runs, process_completion_queue_depth=process_depth,
-            active_delegations=active_delegations)
+            active_delegations=active_delegations, paused_person_sessions=paused_sessions)
         return web.json_response({
 "status": readiness["status"], "readiness": readiness, "platform": "hermes-agent",
             "version": _hermes_version(), "gateway_state": gw_state,

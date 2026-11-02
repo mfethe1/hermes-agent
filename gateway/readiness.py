@@ -100,6 +100,7 @@ def _probe_session_store(runtime_status: dict[str, Any], state_db_probe: dict[st
 def collect_runtime_readiness(
     *, configured_model: str, runtime_status: dict[str, Any] | None, active_api_runs: int = 0,
     process_completion_queue_depth: int = 0, active_delegations: int = 0,
+    paused_person_sessions: int = 0,
 ) -> dict[str, Any]:
     """Bounded readiness diagnostics, no runtime mutation.  Even authenticated, probes
     expose status and counts only: never config values, credentials, paths, payloads."""
@@ -118,6 +119,11 @@ def collect_runtime_readiness(
             process_completions=max(0, int(process_completion_queue_depth)),
             active_delegations=max(0, int(active_delegations)),
         ),
+        # Live conversations paused on a person's turn lost to a restart (FLE-72). A count, not a
+        # verdict: a paused chat is a person owing an answer, not a degraded runtime, and flipping
+        # the whole gateway to "degraded" would page on something only that person can resolve.
+        # A fleet check reads this so a silent chat is visible without somebody opening it.
+        "paused_sessions": _check("ok", unknown_person_turns=max(0, int(paused_person_sessions))),
     }
     return {"status": "ok" if all(c.get("status") == "ok" for c in checks.values()) else "degraded", "checks": checks}
 
